@@ -1,7 +1,5 @@
-
 import logging
 import re
-import time
 import unicodedata
 
 logger = logging.getLogger("NevoBot.Ban")
@@ -37,7 +35,7 @@ KICK_ALIASES = {"kick", "کیک", "اخراج"}
 
 
 def parse_duration(text):
-    """تبدیل مدت‌های شناخته‌شده به ثانیه؛ بدون اجرای بن."""
+    """تبدیل مدت به ثانیه؛ به‌تنهایی هیچ عملیاتی اجرا نمی‌کند."""
     value = normalize_text(text)
 
     match = re.fullmatch(
@@ -45,6 +43,7 @@ def parse_duration(text):
         r"h|hr|hour|ساعت|d|day|روز|w|week|هفته)",
         value,
     )
+
     if not match:
         return None
 
@@ -60,6 +59,7 @@ def parse_duration(text):
     }
 
     seconds = amount * factors[unit]
+
     if not 30 <= seconds <= 366 * 86400:
         return None
 
@@ -68,17 +68,16 @@ def parse_duration(text):
 
 class BanFeature:
     """
-    قابلیت مدیریت اعضا:
-    - بن
-    - انبن
-    - کیک
-    - تشخیص شکل‌های مختلف دستور
+    مدیریت بن، آنبن و اخراج.
 
-    api: تابع api(method, payload) از main.py
-    is_authorized: تابع بررسی مجوز پیام‌دهنده
+    api:
+        تابع api(method, payload) در main.py
+
+    is_authorized:
+        تابعی که ادمین واقعی یا ناظر مجاز را تأیید می‌کند.
     """
 
-    def __init__(self, api, is_authorized=None):
+    def __init__(self, api, is_authorized):
         self.api = api
         self.is_authorized = is_authorized
 
@@ -88,10 +87,10 @@ class BanFeature:
             raise ValueError("شناسه گروه و کاربر الزامی است.")
 
         if not str(chat_id).strip() or not str(user_id).strip():
-            raise ValueError("شناسه گروه یا کاربر نامعتبر است.")
+            raise ValueError("شناسه گروه یا کاربر معتبر نیست.")
 
     def _request(self, method, payload):
-        """درخواست API و بازگرداندن نتیجه واقعی آن."""
+        """ارسال درخواست و بررسی پاسخ واقعی API."""
         try:
             result = self.api(method, payload)
 
@@ -114,25 +113,25 @@ class BanFeature:
                     ),
                 }
 
-            return result
+            return {"ok": True}
 
         except Exception:
-            logger.exception("Moderation request failed: %s", method)
+            logger.exception("Moderation API request failed: %s", method)
             return {
                 "ok": False,
-                "error": "خطا هنگام ارتباط با API بله.",
+                "error": "هنگام ارتباط با API بله خطا رخ داد.",
             }
 
     def ban(self, chat_id, user_id, duration_seconds=None):
-        """بن دائمی؛ بن زمان‌دار تا تأیید API فعال نیست."""
+        """بن دائمی؛ مدت‌دار فعلاً اجرا نمی‌شود."""
         self._validate_ids(chat_id, user_id)
 
         if duration_seconds is not None:
             return {
                 "ok": False,
                 "error": (
-                    "بن زمان‌دار هنوز فعال نیست؛ "
-                    "پشتیبانی پارامتر زمان پایان باید تأیید شود."
+                    "بن زمان‌دار فعلاً فعال نیست. "
+                    "در حال حاضر از دستور بن بدون مدت استفاده کن."
                 ),
             }
 
@@ -145,129 +144,128 @@ class BanFeature:
         )
 
     def unban(self, chat_id, user_id):
-        """رفع مسدودیت؛ فقط اگر عضو بن شده باشد."""
+        """رفع بن کاربر."""
         self._validate_ids(chat_id, user_id)
 
+        # پارامتر اختیاری تأییدنشده نمی‌فرستیم.
         return self._request(
             "unbanChatMember",
             {
                 "chat_id": chat_id,
                 "user_id": user_id,
-                "only_if_banned": True,
             },
         )
 
     def kick(self, chat_id, user_id):
         """
         اخراج قابل بازگشت:
-        بن و سپس رفع بن. اگر مرحله دوم شکست بخورد،
-        صریحاً اعلام می‌شود که وضعیت نهایی نامشخص است.
+        ابتدا بن و سپس رفع بن انجام می‌شود.
         """
         self._validate_ids(chat_id, user_id)
 
         banned = self.ban(chat_id, user_id)
+
         if not banned.get("ok"):
             return banned
 
         unbanned = self.unban(chat_id, user_id)
+
         if not unbanned.get("ok"):
             return {
                 "ok": False,
                 "error": (
-                    "عضو مسدود شد، اما رفع مسدودیت تأیید نشد؛ "
+                    "بن انجام شد، اما رفع بن تأیید نشد. "
                     "وضعیت عضو را در گروه بررسی کن."
                 ),
             }
 
-        return {
-            "ok": True,
-            "message": "درخواست اخراج و رفع مسدودیت موفق بود.",
-        }
+        return {"ok": True}
 
     @staticmethod
     def _get_target(message):
-        """هدف دستور فقط از پیام ریپلای‌شده گرفته می‌شود."""
         reply = message.get("reply_to_message") or {}
         user = reply.get("from") or {}
         return user.get("id")
 
     @staticmethod
     def _parse_command(text):
-        """
-        نتیجه:
-        (action, duration_seconds)
-
-        duration_seconds فقط تشخیص داده می‌شود؛
-        پشتیبانی واقعی بن زمان‌دار در ban() بررسی می‌شود.
-        """
         normalized = normalize_text(text)
+
         if not normalized:
             return None, None
 
-        # ابتدا عبارت‌های چندکلمه‌ای انبن
-        for alias in sorted(UNBAN_ALIASES, key=len, reverse=True):
-            if normalized == normalize_text(alias):
-                return "unban", None
+        # دستورهای فارسی چندکلمه‌ای
+        if normalized in {
+            normalize_text(alias) for alias in UNBAN_ALIASES
+        }:
+            return "unban", None
 
+        if normalized in {
+            normalize_text(alias) for alias in KICK_ALIASES
+        }:
+            return "kick", None
+
+        if normalized in {
+            normalize_text(alias) for alias in BAN_ALIASES
+        }:
+            return "ban", None
+
+        # دستورهای انگلیسی و دستورهای دارای نام ربات
         parts = normalized.split()
         first = parts[0]
 
-        # پشتیبانی از /ban و /ban@nevobot
         if first.startswith("/"):
             first = first[1:].split("@", 1)[0]
 
         rest = " ".join(parts[1:])
 
-        if first in {"unban"} and not rest:
+        if first == "unban" and not rest:
             return "unban", None
 
-        if first in {"kick"} and not rest:
+        if first == "kick" and not rest:
             return "kick", None
 
-        if first in {"ban"}:
+        if first == "ban":
             if not rest:
                 return "ban", None
 
             duration = parse_duration(rest)
+
             if duration is not None:
                 return "ban", duration
 
             return None, None
 
-        # دستورهای فارسی
-        if normalized in {normalize_text(x) for x in KICK_ALIASES}:
-            return "kick", None
-
-        if normalized in {normalize_text(x) for x in BAN_ALIASES}:
-            return "ban", None
-
+        # بن زمان‌دار فارسی؛ شناسایی می‌شود ولی اجرا نخواهد شد.
         for alias in BAN_ALIASES:
             normalized_alias = normalize_text(alias)
-            prefix = normalized_alias + " "
 
-            if normalized.startswith(prefix):
-                duration = parse_duration(
-                    normalized[len(prefix):].strip()
-                )
+            if normalized.startswith(normalized_alias + " "):
+                rest = normalized[len(normalized_alias):].strip()
+                duration = parse_duration(rest)
+
                 if duration is not None:
                     return "ban", duration
 
         return None, None
 
     def handle_message(self, message):
-        """پردازش دستور گروه؛ با بررسی مجوز قبل از اجرا."""
+        """تشخیص و اجرای دستورهای مدیریت اعضا."""
         if not isinstance(message, dict):
             return None
 
         chat = message.get("chat") or {}
+
         if chat.get("type") not in {"group", "supergroup"}:
             return None
 
         text = message.get("text", "")
+
         if not isinstance(text, str):
             return None
 
         action, duration = self._parse_command(text)
+
         if action is None:
             return None
 
@@ -275,14 +273,19 @@ class BanFeature:
         target_id = self._get_target(message)
         sender_id = (message.get("from") or {}).get("id")
 
-        # قبل از تماس API، ورودی‌های ضروری بررسی می‌شوند.
         if chat_id is None:
-            return {"ok": False, "error": "شناسه گروه موجود نیست."}
+            return {
+                "ok": False,
+                "error": "شناسه گروه موجود نیست.",
+            }
 
         if target_id is None:
             return {
                 "ok": False,
-                "error": "برای اجرای دستور روی پیام عضو ریپلای کن.",
+                "error": (
+                    "روی پیام کاربر موردنظر ریپلای کن "
+                    "و بعد دستور را بفرست."
+                ),
             }
 
         if sender_id is not None and str(target_id) == str(sender_id):
@@ -291,13 +294,7 @@ class BanFeature:
                 "error": "نمی‌توانی این دستور را روی خودت اجرا کنی.",
             }
 
-        # نبودن تابع بررسی دسترسی به معنی رد دستور است.
-        if self.is_authorized is None:
-            return {
-                "ok": False,
-                "error": "بررسی دسترسی هنوز تنظیم نشده است.",
-            }
-
+        # اگر بررسی دسترسی خطا بدهد، عملیات اجرا نمی‌شود.
         try:
             if not self.is_authorized(message):
                 return {
@@ -322,6 +319,9 @@ class BanFeature:
                 return self.kick(chat_id, target_id)
 
         except ValueError as error:
-            return {"ok": False, "error": str(error)}
+            return {
+                "ok": False,
+                "error": str(error),
+            }
 
         return None
