@@ -1,4 +1,3 @@
-
 import logging
 import re
 import time
@@ -8,6 +7,7 @@ logger = logging.getLogger("NevoBot.Mute")
 
 
 def normalize_text(value):
+    """یکسان‌سازی متن و اعداد فارسی برای تشخیص دستورها."""
     value = unicodedata.normalize("NFKC", str(value or ""))
 
     value = value.translate(
@@ -29,6 +29,7 @@ def normalize_text(value):
 
 
 def parse_mute_command(text):
+    """تشخیص دستور سکوت، مدت و رفع سکوت."""
     value = normalize_text(text)
 
     unmute_commands = {
@@ -61,6 +62,7 @@ def parse_mute_command(text):
             continue
 
         remainder = value[len(command):].strip()
+
         remainder = re.sub(
             r"^(?:برای|به مدت)\s+",
             "",
@@ -125,15 +127,67 @@ def parse_mute_command(text):
 
 
 class MuteFeature:
+    """
+    سکوت و رفع سکوت کاربران با API بله.
+
+    api:
+        تابع NevoBot.api در main.py
+
+    is_authorized:
+        بررسی مجوز ادمین واقعی یا ناظر گروه
+    """
+
     def __init__(self, api, is_authorized):
         self.api = api
         self.is_authorized = is_authorized
 
     @staticmethod
     def _get_target(message):
+        """دریافت شناسه کاربری که به پیامش ریپلای شده."""
         reply = message.get("reply_to_message") or {}
         user = reply.get("from") or {}
         return user.get("id")
+
+    @staticmethod
+    def _get_permissions(member):
+        """خواندن مجوزها از پاسخ API، با پشتیبانی از دو قالب."""
+        permissions = member.get("permissions")
+
+        if isinstance(permissions, dict):
+            return permissions
+
+        return member
+
+    def _get_member(self, chat_id, user_id):
+        """دریافت وضعیت فعلی عضو از API."""
+        try:
+            response = self.api(
+                "getChatMember",
+                {
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                },
+            )
+        except Exception:
+            logger.exception("getChatMember request failed")
+            return None, "ارتباط با API هنگام بررسی عضو ناموفق بود."
+
+        if not isinstance(response, dict):
+            return None, "پاسخ معتبر از API دریافت نشد."
+
+        if response.get("ok") is not True:
+            error = response.get(
+                "description",
+                "بررسی وضعیت عضو ناموفق بود.",
+            )
+            return None, str(error)
+
+        member = response.get("result")
+
+        if not isinstance(member, dict):
+            return None, "اطلاعات عضو در پاسخ API موجود نیست."
+
+        return member, None
 
     def _api_restrict(
         self,
@@ -142,9 +196,13 @@ class MuteFeature:
         muted,
         until_date=None,
     ):
+        """
+        اعمال محدودیت و سپس بررسی نتیجه واقعی.
+
+        موفقیت درخواست به‌تنهایی برای تأیید سکوت کافی نیست.
+        """
         allowed = not muted
 
-        # پارامترهای مستقیم API بله
         payload = {
             "chat_id": chat_id,
             "user_id": user_id,
@@ -158,26 +216,34 @@ class MuteFeature:
             payload["until_date"] = int(until_date)
 
         try:
-            result = self.api("restrictChatMember", payload)
+            response = self.api(
+                "restrictChatMember",
+                payload,
+            )
         except Exception as exc:
             logger.exception("restrictChatMember request failed")
-            return False, str(exc)
+            return False, f"خطای درخواست API: {exc}"
 
-        if not isinstance(result, dict):
-            logger.error(
-                "Invalid restrictChatMember response: %r",
-                result,
-            )
-            return False, "پاسخ معتبر از API بله دریافت نشد."
+        logger.info(
+            "restrictChatMember response | chat=%s | "
+            "user=%s | muted=%s | response=%r",
+            chat_id,
+            user_id,
+            muted,
+            response,
+        )
 
-        if result.get("ok") is not True:
-            error = result.get(
+        if not isinstance(response, dict):
+            return False, "پاسخ معتبر از API دریافت نشد."
+
+        if response.get("ok") is not True:
+            error = response.get(
                 "description",
-                "API درخواست سکوت را تأیید نکرد.",
+                "API درخواست محدودسازی را نپذیرفت.",
             )
 
             logger.error(
-                "restrictChatMember failed | chat=%s | "
+                "Restriction request rejected | chat=%s | "
                 "user=%s | error=%s",
                 chat_id,
                 user_id,
@@ -186,30 +252,100 @@ class MuteFeature:
 
             return False, str(error)
 
-        # صرف ok کافی نیست؛ نتیجه عملیات هم باید موفق باشد.
-        if result.get("result") is not True:
-            logger.error(
-                "restrictChatMember returned unexpected result: %r",
-                result.get("result"),
+        if response.get("result") is not True:
+            return (
+                False,
+                "API موفقیت عملیات محدودسازی را تأیید نکرد.",
             )
-            return False, "API موفقیت اعمال محدودیت را تأیید نکرد."
+
+        # موفقیت اولیه ثبت شد؛ اکنون وضعیت واقعی عضو را بررسی می‌کنیم.
+        member, error = self._get_member(chat_id, user_id)
+
+        if member is None:
+            logger.error(
+                "Restriction verification unavailable | "
+                "chat=%s | user=%s | error=%s",
+                chat_id,
+                user_id,
+                error,
+            )
+
+            return (
+                False,
+                "درخواست پذیرفته شد، اما وضعیت محدودیت قابل "
+                f"تأیید نیست: {error}",
+            )
+
+        status = str(member.get("status", "")).lower()
+        permissions = self._get_permissions(member)
+        can_send = permissions.get("can_send_messages")
 
         logger.info(
-            "Restriction applied | chat=%s | user=%s | muted=%s",
+            "Member restriction verification | chat=%s | "
+            "user=%s | status=%s | can_send_messages=%r",
             chat_id,
             user_id,
-            muted,
+            status,
+            can_send,
+        )
+
+        if muted:
+            # برای تأیید سکوت، هم وضعیت محدودشده و هم
+            # ممنوع‌بودن ارسال پیام باید در پاسخ دیده شود.
+            if status == "restricted" and can_send is False:
+                logger.info(
+                    "Mute verified | chat=%s | user=%s",
+                    chat_id,
+                    user_id,
+                )
+                return True, None
+
+            logger.error(
+                "Mute could not be verified | chat=%s | "
+                "user=%s | status=%s | can_send_messages=%r",
+                chat_id,
+                user_id,
+                status,
+                can_send,
+            )
+
+            return (
+                False,
+                "API درخواست را پذیرفته، اما پاسخ بررسی عضو "
+                "محدودیت ارسال پیام را تأیید نکرد. نوع گروه، "
+                "مجوز ربات و وضعیت عضو را بررسی کن.",
+            )
+
+        # برای رفع سکوت، عضو نباید همچنان محدود باشد.
+        if status == "restricted" and can_send is not True:
+            logger.error(
+                "Unmute could not be verified | chat=%s | user=%s",
+                chat_id,
+                user_id,
+            )
+
+            return (
+                False,
+                "رفع سکوت تأیید نشد؛ کاربر ممکن است هنوز محدود باشد.",
+            )
+
+        logger.info(
+            "Unmute verified | chat=%s | user=%s",
+            chat_id,
+            user_id,
         )
 
         return True, None
 
     def handle_message(self, message):
+        """پردازش دستورهای سکوت و رفع سکوت."""
         if not isinstance(message, dict):
             return None
 
         chat = message.get("chat") or {}
+        chat_type = str(chat.get("type", "")).lower()
 
-        if chat.get("type") not in {"group", "supergroup"}:
+        if chat_type not in {"group", "supergroup"}:
             return None
 
         text = message.get("text", "")
@@ -241,18 +377,45 @@ class MuteFeature:
                 )
             }
 
-        if sender_id is not None and str(sender_id) == str(target_id):
-            return {"text": "❌ نمی‌تونی این دستور رو روی خودت اجرا کنی."}
+        if (
+            sender_id is not None
+            and str(sender_id) == str(target_id)
+        ):
+            return {
+                "text": "❌ نمی‌تونی این دستور رو روی خودت اجرا کنی."
+            }
 
         try:
             authorized = self.is_authorized(message)
         except Exception:
             logger.exception("Mute authorization check failed")
-            return {"text": "❌ بررسی دسترسی ناموفق بود."}
+            return {
+                "text": "❌ بررسی دسترسی ناموفق بود؛ دستور اجرا نشد."
+            }
 
         if not authorized:
             return {
-                "text": "⛔ فقط ادمین گروه یا ناظر مجاز می‌تونه این دستور رو اجرا کنه."
+                "text": (
+                    "⛔ فقط ادمین گروه یا ناظر مجاز "
+                    "می‌تونه این دستور رو اجرا کنه."
+                )
+            }
+
+        # طبق مستندات API، restrictChatMember مخصوص سوپرگروه است.
+        if chat_type != "supergroup":
+            logger.warning(
+                "Mute unsupported for chat type | "
+                "chat=%s | type=%s",
+                chat_id,
+                chat_type,
+            )
+
+            return {
+                "text": (
+                    "❌ نوع این گروه برای محدودسازی با "
+                    "restrictChatMember پشتیبانی نمی‌شه. "
+                    "باید گروه از نوع سوپرگروه باشه."
+                )
             }
 
         if action == "mute":
@@ -271,21 +434,25 @@ class MuteFeature:
             if not success:
                 return {
                     "text": (
-                        "❌ سکوت اعمال نشد.\n"
-                        f"خطای API: {error}\n\n"
-                        "بررسی کن ربات ادمین گروه باشه و "
-                        "مجوز محدودکردن اعضا رو داشته باشه."
+                        "❌ سکوت تأیید نشد.\n"
+                        f"جزئیات: {error}\n\n"
+                        "بررسی کن ربات ادمین سوپرگروه باشه "
+                        "و مجوز محدودکردن اعضا رو داشته باشه."
                     )
                 }
 
             if duration is None:
-                return {"text": "🔇 درخواست سکوت با موفقیت تأیید شد."}
+                return {
+                    "text": (
+                        "🔇 سکوت اعمال شد و وضعیت محدودیت "
+                        "از API تأیید شد."
+                    )
+                }
 
             return {
                 "text": (
-                    f"🔇 سکوت برای {duration} ثانیه اعمال شد.\n"
-                    "پایان محدودیت زمان‌دار به پشتیبانی API از "
-                    "until_date بستگی داره."
+                    f"🔇 سکوت {duration} ثانیه‌ای اعمال شد "
+                    "و وضعیت محدودیت از API تأیید شد."
                 )
             }
 
@@ -297,10 +464,13 @@ class MuteFeature:
 
         if not success:
             return {
-                "text": f"❌ رفع سکوت انجام نشد.\nخطای API: {error}"
+                "text": f"❌ رفع سکوت تأیید نشد.\nجزئیات: {error}"
             }
 
-        return {"text": "🔊 درخواست رفع سکوت با موفقیت تأیید شد."}
+        return {
+            "text": "🔊 رفع سکوت انجام شد و وضعیت عضو بررسی شد."
+        }
 
     def handle(self, message):
+        """سازگاری با فراخوانی‌های قدیمی."""
         return self.handle_message(message)
