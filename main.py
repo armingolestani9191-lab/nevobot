@@ -1,5 +1,3 @@
-# main.py
-
 import logging
 import time
 import requests
@@ -34,6 +32,10 @@ from features.whisper import (
 )
 
 
+# ==========================================
+#              Logging
+# ==========================================
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -42,12 +44,16 @@ logging.basicConfig(
 logger = logging.getLogger("NevoBot")
 
 
+# ==========================================
+#                 NevoBot
+# ==========================================
+
 class NevoBot:
 
     def __init__(self):
         if not BOT_TOKEN:
             raise RuntimeError(
-                "توکن ربات در تنظیمات تنظیم نشده است."
+                "توکن ربات در config.py تنظیم نشده است."
             )
 
         self.base_url = f"{API_BASE_URL}/bot{BOT_TOKEN}"
@@ -112,7 +118,10 @@ class NevoBot:
                 logger.warning(
                     "API error (%s): %s",
                     method,
-                    data.get("description", "Unknown error"),
+                    data.get(
+                        "description",
+                        "Unknown error",
+                    ),
                 )
 
             return data
@@ -124,7 +133,12 @@ class NevoBot:
             )
             return None
 
-    def send_message(self, chat_id, text, keyboard=None):
+    def send_message(
+        self,
+        chat_id,
+        text,
+        keyboard=None,
+    ):
         """ارسال پیام به گروه یا گفت‌وگوی خصوصی."""
 
         payload = {
@@ -135,9 +149,16 @@ class NevoBot:
         if keyboard is not None:
             payload["reply_markup"] = keyboard
 
-        return self.api("sendMessage", payload)
+        return self.api(
+            "sendMessage",
+            payload,
+        )
 
-    def delete_message(self, chat_id, message_id):
+    def delete_message(
+        self,
+        chat_id,
+        message_id,
+    ):
         """حذف پیام از گروه."""
 
         if chat_id is None or message_id is None:
@@ -151,10 +172,17 @@ class NevoBot:
             },
         )
 
-        return bool(result and result.get("ok"))
+        return bool(
+            result and result.get("ok")
+        )
 
-    def answer_callback(self, callback_id, text, show_alert=True):
-        """نمایش پنجره هشدار هنگام کلیک روی دکمه."""
+    def answer_callback(
+        self,
+        callback_id,
+        text,
+        show_alert=True,
+    ):
+        """نمایش پنجره هنگام کلیک روی دکمه."""
 
         if not callback_id:
             return None
@@ -169,11 +197,39 @@ class NevoBot:
         )
 
     # ==========================================
-    #                Whisper Feature
+    #              Whisper Feature
     # ==========================================
 
+    @staticmethod
+    def get_display_name(user):
+        """ساخت نام نمایشی فرستنده نجوا."""
+
+        first_name = str(
+            user.get("first_name") or ""
+        ).strip()
+
+        last_name = str(
+            user.get("last_name") or ""
+        ).strip()
+
+        full_name = (
+            f"{first_name} {last_name}"
+        ).strip()
+
+        if full_name:
+            return full_name
+
+        username = str(
+            user.get("username") or ""
+        ).strip()
+
+        if username:
+            return f"@{username}"
+
+        return "کاربر"
+
     def discard_whisper(self, whisper_id):
-        """حذف نجوا در صورت شکست ارسال اعلان."""
+        """حذف نجوا در صورت شکست ارسال."""
 
         try:
             with get_connection() as connection:
@@ -189,36 +245,10 @@ class NevoBot:
                 whisper_id,
             )
 
-    @staticmethod
-    def get_display_name(user):
-        """ساخت اسم نمایشی کاربر."""
-
-        first_name = str(
-            user.get("first_name") or ""
-        ).strip()
-
-        last_name = str(
-            user.get("last_name") or ""
-        ).strip()
-
-        full_name = f"{first_name} {last_name}".strip()
-
-        if full_name:
-            return full_name
-
-        username = str(
-            user.get("username") or ""
-        ).strip()
-
-        if username:
-            return f"@{username}"
-
-        return "کاربر"
-
     def handle_whisper_message(self, message):
         """
         استفاده:
-        روی پیام شخص ریپلای کن و بنویس:
+        روی پیام مخاطب ریپلای کن و بنویس:
         نجوا متن پیام
         """
 
@@ -232,7 +262,10 @@ class NevoBot:
         text = message.get("text", "")
 
         # نجوا فقط در گروه فعال است.
-        if chat_type not in {"group", "supergroup"}:
+        if chat_type not in {
+            "group",
+            "supergroup",
+        }:
             return False
 
         if not isinstance(text, str):
@@ -241,7 +274,10 @@ class NevoBot:
         text = text.strip()
 
         # شناسایی دستور نجوا
-        if text != "نجوا" and not text.startswith("نجوا "):
+        if (
+            text != "نجوا"
+            and not text.startswith("نجوا ")
+        ):
             return False
 
         whisper_text = text[len("نجوا"):].strip()
@@ -250,27 +286,32 @@ class NevoBot:
         if not whisper_text:
             self.send_message(
                 chat_id,
-                "💌 برای ارسال نجوا، روی پیام مخاطب ریپلای کن و بنویس:\n"
+                "💌 برای ارسال نجوا، روی پیام مخاطب "
+                "ریپلای کن و بنویس:\n"
                 "نجوا متن پیام",
             )
             return True
 
-        # بررسی ریپلای
+        # بررسی پیام ریپلای‌شده
         replied_message = (
             message.get("reply_to_message") or {}
         )
 
-        recipient = replied_message.get("from") or {}
+        recipient = (
+            replied_message.get("from") or {}
+        )
+
         recipient_id = recipient.get("id")
 
         if recipient_id is None:
             self.send_message(
                 chat_id,
-                "❌ برای ارسال نجوا باید روی پیام شخص موردنظر ریپلای کنی.",
+                "❌ برای ارسال نجوا باید روی پیام "
+                "شخص موردنظر ریپلای کنی.",
             )
             return True
 
-        # جلوگیری از نجوا به خود
+        # جلوگیری از ارسال نجوا به خود شخص
         if str(recipient_id) == str(sender_id):
             self.send_message(
                 chat_id,
@@ -278,7 +319,7 @@ class NevoBot:
             )
             return True
 
-        # پیام‌های خود ربات را هدف نجوا قرار نده.
+        # جلوگیری از ارسال نجوا به ربات
         if recipient.get("is_bot"):
             self.send_message(
                 chat_id,
@@ -286,9 +327,11 @@ class NevoBot:
             )
             return True
 
-        sender_name = self.get_display_name(sender)
+        sender_name = self.get_display_name(
+            sender
+        )
 
-        # ذخیره متن و اسم فعلی فرستنده
+        # ذخیره نجوا در دیتابیس
         try:
             whisper_id = save_whisper(
                 chat_id=chat_id,
@@ -307,22 +350,27 @@ class NevoBot:
             return True
 
         except Exception:
-            logger.exception("Could not save whisper")
+            logger.exception(
+                "Could not save whisper"
+            )
 
             self.send_message(
                 chat_id,
-                "❌ ذخیره نجوا ناموفق بود؛ دوباره تلاش کن.",
+                "❌ ذخیره نجوا ناموفق بود؛ "
+                "دوباره تلاش کن.",
             )
             return True
 
-        # حذف متن اصلی تا نجوا در گروه افشا نشود.
+        # حذف متن نجوا از گروه
         deleted = self.delete_message(
             chat_id,
             message_id,
         )
 
         if not deleted:
-            self.discard_whisper(whisper_id)
+            self.discard_whisper(
+                whisper_id
+            )
 
             self.send_message(
                 chat_id,
@@ -331,12 +379,12 @@ class NevoBot:
             )
             return True
 
-        # دکمه بازکردن نجوا
+        # دکمه باز کردن نجوا
         keyboard = {
             "inline_keyboard": [
                 [
                     {
-                        "text": "💌 باز کردن",
+                        "text": "💌 باز کردن نجوا",
                         "callback_data": (
                             f"whisper_open:{whisper_id}"
                         ),
@@ -345,20 +393,36 @@ class NevoBot:
             ]
         }
 
-        # اعلان در خود گروه، نه پیام خصوصی
-        result = self.send_message(
-            chat_id,
-            "💌 یه نجوا داری!",
-            keyboard,
+        # اعلان خصوصی؛ متن نجوا در اعلان نیست.
+        notification = self.api(
+            "sendMessage",
+            {
+                "chat_id": recipient_id,
+                "text": (
+                    "💌 یه نجوای جدید داری!\n\n"
+                    "برای دیدن پیام، روی دکمه زیر بزن."
+                ),
+                "reply_markup": keyboard,
+            },
         )
 
-        if not result or not result.get("ok"):
-            self.discard_whisper(whisper_id)
+        if (
+            not notification
+            or not notification.get("ok")
+        ):
+            self.discard_whisper(
+                whisper_id
+            )
 
             self.send_message(
                 chat_id,
-                "❌ ارسال اعلان نجوا ناموفق بود.",
+                "⚠️ پیام گروه حذف شد، اما نتونستم "
+                "اعلان خصوصی بفرستم.\n"
+                "مخاطب باید اول وارد گفت‌وگوی خصوصی "
+                "ربات بشه و /start رو بزنه؛ "
+                "بعد دوباره نجوا رو ارسال کن.",
             )
+
             return True
 
         logger.info(
@@ -370,31 +434,47 @@ class NevoBot:
 
         return True
 
-    def handle_callback_query(self, callback_query):
-        """رسیدگی امن به کلیک روی دکمه نجوا."""
+    def handle_callback_query(
+        self,
+        callback_query,
+    ):
+        """رسیدگی به کلیک دکمه بازکردن نجوا."""
 
-        if not isinstance(callback_query, dict):
+        if not isinstance(
+            callback_query,
+            dict,
+        ):
             return
 
         callback_id = callback_query.get("id")
+
         callback_data = str(
             callback_query.get("data", "")
         )
 
-        user = callback_query.get("from") or {}
+        user = (
+            callback_query.get("from") or {}
+        )
+
         user_id = user.get("id")
 
-        if not callback_id or user_id is None:
+        if (
+            not callback_id
+            or user_id is None
+        ):
             return
 
-        if not callback_data.startswith("whisper_open:"):
+        if not callback_data.startswith(
+            "whisper_open:"
+        ):
             return
 
-        # بررسی شناسه
+        # بررسی شناسه نجوا
         try:
             whisper_id = int(
                 callback_data.split(":", 1)[1]
             )
+
         except (ValueError, IndexError):
             self.answer_callback(
                 callback_id,
@@ -403,8 +483,7 @@ class NevoBot:
             )
             return
 
-        # فقط مخاطب اصلی می‌تواند متن را دریافت کند.
-        # این بررسی از دیتابیس انجام می‌شود، نه از اطلاعات دکمه.
+        # فقط دریافت‌کننده اصلی مجاز است.
         whisper = open_whisper(
             whisper_id,
             user_id,
@@ -413,7 +492,7 @@ class NevoBot:
         if not whisper:
             self.answer_callback(
                 callback_id,
-                "این نجوا مال تو نیست و نمی‌تونی بخونیش!",
+                "این نجوا برای تو نیست.",
                 show_alert=True,
             )
             return
@@ -426,7 +505,6 @@ class NevoBot:
             whisper.get("sender_name") or "کاربر"
         )
 
-        # متن پنجره برای دریافت‌کننده اصلی
         alert_text = (
             f"نجوا از طرف {sender_name}\n\n"
             f"{whisper_text}"
@@ -443,26 +521,25 @@ class NevoBot:
             show_alert=True,
         )
 
-        # اگر API نمایش پنجره را نپذیرفت، متن فقط به
-        # گفت‌وگوی خصوصی دریافت‌کننده ارسال می‌شود.
-        # متن هرگز برای کاربر غیرمجاز ارسال نمی‌شود.
+        # در صورت شکست پنجره، پیام فقط خصوصی ارسال می‌شود.
         if not result or not result.get("ok"):
             logger.warning(
-                "Could not display whisper popup for user %s",
+                "Could not display whisper popup "
+                "for user %s",
                 user_id,
             )
 
             self.send_message(
                 user_id,
-                alert_text,
+                "💌 متن نجوا:\n\n" + alert_text,
             )
 
     # ==========================================
-    #          Administrator Checking
+    #         Administrator Checking
     # ==========================================
 
     def is_group_admin(self, message):
-        """بررسی دسترسی مدیریت گروه از طریق API."""
+        """بررسی ادمین واقعی گروه از طریق API."""
 
         chat = message.get("chat") or {}
         sender = message.get("from") or {}
@@ -470,10 +547,16 @@ class NevoBot:
         chat_id = chat.get("id")
         user_id = sender.get("id")
 
-        if chat.get("type") not in {"group", "supergroup"}:
+        if chat.get("type") not in {
+            "group",
+            "supergroup",
+        }:
             return False
 
-        if chat_id is None or user_id is None:
+        if (
+            chat_id is None
+            or user_id is None
+        ):
             return False
 
         result = self.api(
@@ -484,13 +567,17 @@ class NevoBot:
             },
         )
 
-        if not result or not result.get("ok"):
+        if (
+            not result
+            or not result.get("ok")
+        ):
             logger.warning(
                 "Could not verify group administrator"
             )
             return False
 
         member = result.get("result") or {}
+
         status = str(
             member.get("status", "")
         ).lower()
@@ -503,7 +590,7 @@ class NevoBot:
         }
 
     def is_moderation_authorized(self, message):
-        """اجازه مدیریت برای ادمین واقعی یا ناظر ثبت‌شده."""
+        """اجازه مدیریت برای ادمین یا ناظر ثبت‌شده."""
 
         if self.is_group_admin(message):
             return True
@@ -514,7 +601,10 @@ class NevoBot:
         chat_id = chat.get("id")
         user_id = sender.get("id")
 
-        if chat.get("type") not in {"group", "supergroup"}:
+        if chat.get("type") not in {
+            "group",
+            "supergroup",
+        }:
             return False
 
         return self.moderators_feature.is_moderator(
@@ -535,9 +625,11 @@ class NevoBot:
         if chat_id is None:
             return False
 
-        # ۱. مدیریت ناظرها
+        # مدیریت ناظرها
         moderator_result = (
-            self.moderators_feature.handle_message(message)
+            self.moderators_feature.handle_message(
+                message
+            )
         )
 
         if moderator_result is not None:
@@ -550,8 +642,12 @@ class NevoBot:
             )
             return True
 
-        # ۲. سکوت و رفع سکوت
-        mute_result = self.mute_feature.handle_message(message)
+        # سکوت و رفع سکوت
+        mute_result = (
+            self.mute_feature.handle_message(
+                message
+            )
+        )
 
         if mute_result is not None:
             self.send_message(
@@ -563,8 +659,12 @@ class NevoBot:
             )
             return True
 
-        # ۳. ضداسپم
-        spam_result = self.spam_feature.handle_message(message)
+        # ضداسپم
+        spam_result = (
+            self.spam_feature.handle_message(
+                message
+            )
+        )
 
         if spam_result is not None:
             if "text" in spam_result:
@@ -575,8 +675,10 @@ class NevoBot:
 
             return True
 
-        # ۴. بن، رفع بن و اخراج
-        result = self.ban_feature.handle_message(message)
+        # بن، رفع بن و اخراج
+        result = self.ban_feature.handle_message(
+            message
+        )
 
         if result is None:
             return False
@@ -591,16 +693,21 @@ class NevoBot:
             )
             return True
 
-        action, duration = self.ban_feature._parse_command(
-            message.get("text", "")
+        action, duration = (
+            self.ban_feature._parse_command(
+                message.get("text", "")
+            )
         )
 
         if action == "ban":
             response_text = "✅ بن کاربر انجام شد."
+
         elif action == "unban":
             response_text = "✅ رفع بن کاربر انجام شد."
+
         elif action == "kick":
             response_text = "✅ درخواست اخراج انجام شد."
+
         else:
             response_text = "✅ عملیات انجام شد."
 
@@ -612,7 +719,7 @@ class NevoBot:
         return True
 
     # ==========================================
-    #               Message Handling
+    #              Message Handling
     # ==========================================
 
     def handle_message(self, message):
@@ -627,7 +734,10 @@ class NevoBot:
         chat_id = chat.get("id")
         user_id = user.get("id")
 
-        if chat_id is None or user_id is None:
+        if (
+            chat_id is None
+            or user_id is None
+        ):
             return
 
         first_name = user.get("first_name", "")
@@ -642,11 +752,209 @@ class NevoBot:
             first_name,
         )
 
-        if chat_type in {"group", "supergroup"}:
+        # پیام‌های گروه
+        if chat_type in {
+            "group",
+            "supergroup",
+        }:
             save_group(
                 chat_id,
                 chat.get("title", ""),
             )
 
             if text:
-                record_group
+                record_group_message(
+                    chat_id,
+                    user_id,
+                )
+
+            # نجوا باید قبل از ضداسپم بررسی شود.
+            if self.handle_whisper_message(
+                message
+            ):
+                return
+
+            # فرمان‌های مدیریتی و ضداسپم
+            if self.handle_moderation(
+                message
+            ):
+                return
+
+        if not isinstance(text, str):
+            return
+
+        command = (
+            text.split(maxsplit=1)[0].lower()
+            if text
+            else ""
+        )
+
+        # شروع ربات
+        if (
+            chat_type == "private"
+            and command in {
+                "/start",
+                "/start@nevobot",
+            }
+        ):
+            self.send_message(
+                chat_id,
+                (
+                    f"سلام {first_name or 'رفیق'}! 👋\n\n"
+                    "به NevoBot خوش اومدی.\n"
+                    "مدیریت گروه‌ها با امکانات قابل تنظیم.\n\n"
+                    "برای شروع از منوی زیر استفاده کن."
+                ),
+                main_menu(),
+            )
+
+        # راهنما
+        elif (
+            chat_type == "private"
+            and text == "📚 راهنما"
+        ):
+            self.send_message(
+                chat_id,
+                (
+                    "📚 راهنمای NevoBot\n\n"
+                    "ربات را به گروه اضافه کن و مجوزهای "
+                    "موردنیاز را به آن بده.\n"
+                    "برای استفاده از سکوت، بن و مدیریت اعضا، "
+                    "ربات باید مجوزهای لازم را داشته باشد."
+                ),
+                main_menu(),
+            )
+
+        # مدیریت گروه‌ها
+        elif (
+            chat_type == "private"
+            and text == "📊 مدیریت گروه‌ها"
+        ):
+            self.send_message(
+                chat_id,
+                "📊 بخش مدیریت گروه‌ها در حال توسعه است.",
+                main_menu(),
+            )
+
+        # تنظیمات
+        elif (
+            chat_type == "private"
+            and text == "⚙️ تنظیمات"
+        ):
+            self.send_message(
+                chat_id,
+                "⚙️ تنظیمات NevoBot در حال توسعه است.",
+                main_menu(),
+            )
+
+        # دستیار هوشمند
+        elif (
+            chat_type == "private"
+            and text == "🤖 دستیار هوشمند"
+        ):
+            self.send_message(
+                chat_id,
+                "🤖 این بخش هنوز فعال نشده است.",
+                main_menu(),
+            )
+
+    # ==========================================
+    #                   Main Loop
+    # ==========================================
+
+    def run(self):
+        """راه‌اندازی دیتابیس و اجرای حلقه ربات."""
+
+        logger.info("Initializing database...")
+
+        init_database()
+        init_whisper()
+
+        logger.info("NevoBot is starting...")
+
+        # بررسی توکن و ارتباط با بله
+        info = self.api("getMe")
+
+        if (
+            not info
+            or not info.get("ok")
+        ):
+            raise RuntimeError(
+                "اتصال به API بله ناموفق بود؛ "
+                "توکن و اتصال شبکه را بررسی کن."
+            )
+
+        bot_info = info.get("result") or {}
+
+        logger.info(
+            "Bot connected: @%s",
+            bot_info.get("username", "unknown"),
+        )
+
+        logger.info("Polling started.")
+
+        while True:
+            updates = self.api(
+                "getUpdates",
+                {
+                    "offset": self.offset,
+                    "timeout": POLLING_TIMEOUT,
+                    "allowed_updates": [
+                        "message",
+                        "callback_query",
+                    ],
+                },
+            )
+
+            if (
+                not updates
+                or not updates.get("ok")
+            ):
+                logger.warning(
+                    "getUpdates failed; retrying..."
+                )
+                time.sleep(2)
+                continue
+
+            for update in updates.get("result", []):
+                update_id = update.get("update_id")
+
+                if isinstance(update_id, int):
+                    self.offset = max(
+                        self.offset,
+                        update_id + 1,
+                    )
+
+                try:
+                    if "callback_query" in update:
+                        self.handle_callback_query(
+                            update["callback_query"]
+                        )
+
+                    elif "message" in update:
+                        self.handle_message(
+                            update["message"]
+                        )
+
+                except Exception:
+                    logger.exception(
+                        "Failed to process update"
+                    )
+
+
+# ==========================================
+#                Program Entry
+# ==========================================
+
+if __name__ == "__main__":
+    try:
+        NevoBot().run()
+
+    except KeyboardInterrupt:
+        logger.info("NevoBot stopped manually.")
+
+    except Exception:
+        logger.exception(
+            "NevoBot failed to start or stopped unexpectedly."
+        )
+        raise
