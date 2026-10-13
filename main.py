@@ -1,4 +1,3 @@
-
 import logging
 import time
 import requests
@@ -34,7 +33,7 @@ from features.whisper import (
 
 
 # ==========================================
-#              Logging
+#                 Logging
 # ==========================================
 
 logging.basicConfig(
@@ -46,7 +45,7 @@ logger = logging.getLogger("NevoBot")
 
 
 # ==========================================
-#                 NevoBot
+#                  NevoBot
 # ==========================================
 
 class NevoBot:
@@ -66,24 +65,20 @@ class NevoBot:
 
         self.offset = 0
 
-        # مدیریت ناظرها
         self.moderators_feature = ModeratorsFeature(
             is_group_admin=self.is_group_admin,
         )
 
-        # بن، رفع بن و اخراج
         self.ban_feature = BanFeature(
             api=self.api,
             is_authorized=self.is_moderation_authorized,
         )
 
-        # سکوت و رفع سکوت
         self.mute_feature = MuteFeature(
             api=self.api,
             is_authorized=self.is_moderation_authorized,
         )
 
-        # ضداسپم
         self.spam_feature = SpamFeature(
             api=self.api,
             is_authorized=self.is_moderation_authorized,
@@ -94,7 +89,7 @@ class NevoBot:
     # ==========================================
 
     def api(self, method, payload=None):
-        """ارسال درخواست به API بله."""
+        """ارسال درخواست به API بله و ثبت جزئیات خطا."""
 
         url = f"{self.base_url}/{method}"
 
@@ -105,31 +100,84 @@ class NevoBot:
                 timeout=REQUEST_TIMEOUT,
             )
 
-            response.raise_for_status()
-            data = response.json()
+            # ابتدا پاسخ را می‌خوانیم تا در صورت خطای HTTP
+            # متن واقعی خطای بله نیز در لاگ ثبت شود.
+            try:
+                data = response.json()
+            except ValueError:
+                data = None
+
+            if response.status_code >= 400:
+                logger.error(
+                    "Bale API HTTP error | method=%s | status=%s | "
+                    "response=%s",
+                    method,
+                    response.status_code,
+                    (
+                        response.text[:1500]
+                        if response.text
+                        else "(empty response)"
+                    ),
+                )
+
+                # اگر پاسخ JSON معتبر باشد، جزئیات خطا را
+                # به فراخواننده می‌دهیم.
+                if isinstance(data, dict):
+                    return data
+
+                return {
+                    "ok": False,
+                    "description": (
+                        f"HTTP {response.status_code}: "
+                        f"{response.text[:500]}"
+                    ),
+                }
 
             if not isinstance(data, dict):
-                logger.warning(
-                    "Invalid API response: %s",
+                logger.error(
+                    "Invalid API response | method=%s | response=%s",
                     method,
+                    response.text[:1000],
                 )
-                return None
+                return {
+                    "ok": False,
+                    "description": "پاسخ API معتبر نیست.",
+                }
 
             if not data.get("ok"):
                 logger.warning(
-                    "API error (%s): %s",
+                    "Bale API returned an error | method=%s | "
+                    "description=%s",
                     method,
-                    data.get(
-                        "description",
-                        "Unknown error",
-                    ),
+                    data.get("description", "Unknown error"),
                 )
 
             return data
 
-        except (requests.RequestException, ValueError):
+        except requests.Timeout:
+            logger.error(
+                "Bale API timeout | method=%s",
+                method,
+            )
+            return {
+                "ok": False,
+                "description": "درخواست به علت اتمام زمان پاسخ ناموفق بود.",
+            }
+
+        except requests.RequestException as error:
+            logger.error(
+                "Bale API request exception | method=%s | error=%s",
+                method,
+                str(error),
+            )
+            return {
+                "ok": False,
+                "description": str(error),
+            }
+
+        except Exception:
             logger.exception(
-                "Request failed: %s",
+                "Unexpected API error | method=%s",
                 method,
             )
             return None
@@ -183,22 +231,87 @@ class NevoBot:
         text,
         show_alert=True,
     ):
-        """نمایش پنجره هنگام کلیک روی دکمه."""
+        """
+        پاسخ به کلیک دکمه.
+
+        در صورت شکست درخواست اول، خطای واقعی ثبت می‌شود
+        و یک بار درخواست ساده‌تر امتحان می‌شود.
+        """
 
         if not callback_id:
-            return None
+            logger.warning(
+                "Cannot answer callback: callback ID is missing."
+            )
+            return {
+                "ok": False,
+                "description": "callback_query_id خالی است.",
+            }
 
-        return self.api(
+        # محدودیت طول متن اعلان را رعایت می‌کنیم.
+        callback_text = str(text or "")[:190]
+
+        payload = {
+            "callback_query_id": callback_id,
+            "text": callback_text,
+            "show_alert": bool(show_alert),
+        }
+
+        result = self.api(
+            "answerCallbackQuery",
+            payload,
+        )
+
+        if result and result.get("ok"):
+            return result
+
+        description = (
+            result.get("description", "Unknown error")
+            if isinstance(result, dict)
+            else "No API response"
+        )
+
+        logger.warning(
+            "answerCallbackQuery failed | callback_id=%s | "
+            "description=%s",
+            callback_id,
+            description,
+        )
+
+        # تلاش دوم: حذف پارامتر اختیاری show_alert.
+        # اگر callback منقضی شده باشد، این تلاش هم ناموفق می‌شود.
+        fallback_result = self.api(
             "answerCallbackQuery",
             {
                 "callback_query_id": callback_id,
-                "text": str(text),
-                "show_alert": show_alert,
+                "text": callback_text,
             },
         )
 
+        if fallback_result and fallback_result.get("ok"):
+            logger.info(
+                "Callback answered using fallback | callback_id=%s",
+                callback_id,
+            )
+            return fallback_result
+
+        fallback_description = (
+            fallback_result.get("description", "Unknown error")
+            if isinstance(fallback_result, dict)
+            else "No API response"
+        )
+
+        logger.error(
+            "Callback could not be answered | callback_id=%s | "
+            "first_error=%s | fallback_error=%s",
+            callback_id,
+            description,
+            fallback_description,
+        )
+
+        return fallback_result
+
     # ==========================================
-    #              Whisper Feature
+    #                Whisper Feature
     # ==========================================
 
     @staticmethod
@@ -213,9 +326,7 @@ class NevoBot:
             user.get("last_name") or ""
         ).strip()
 
-        full_name = (
-            f"{first_name} {last_name}"
-        ).strip()
+        full_name = f"{first_name} {last_name}".strip()
 
         if full_name:
             return full_name
@@ -262,7 +373,6 @@ class NevoBot:
         message_id = message.get("message_id")
         text = message.get("text", "")
 
-        # نجوا فقط در گروه فعال است.
         if chat_type not in {
             "group",
             "supergroup",
@@ -274,7 +384,6 @@ class NevoBot:
 
         text = text.strip()
 
-        # شناسایی دستور نجوا
         if (
             text != "نجوا"
             and not text.startswith("نجوا ")
@@ -283,7 +392,6 @@ class NevoBot:
 
         whisper_text = text[len("نجوا"):].strip()
 
-        # دستور بدون متن
         if not whisper_text:
             self.send_message(
                 chat_id,
@@ -293,15 +401,11 @@ class NevoBot:
             )
             return True
 
-        # بررسی پیام ریپلای‌شده
         replied_message = (
             message.get("reply_to_message") or {}
         )
 
-        recipient = (
-            replied_message.get("from") or {}
-        )
-
+        recipient = replied_message.get("from") or {}
         recipient_id = recipient.get("id")
 
         if recipient_id is None:
@@ -312,7 +416,6 @@ class NevoBot:
             )
             return True
 
-        # جلوگیری از ارسال نجوا به خود شخص
         if str(recipient_id) == str(sender_id):
             self.send_message(
                 chat_id,
@@ -320,7 +423,6 @@ class NevoBot:
             )
             return True
 
-        # جلوگیری از ارسال نجوا به ربات
         if recipient.get("is_bot"):
             self.send_message(
                 chat_id,
@@ -330,7 +432,6 @@ class NevoBot:
 
         sender_name = self.get_display_name(sender)
 
-        # ذخیره نجوا در دیتابیس
         try:
             whisper_id = save_whisper(
                 chat_id=chat_id,
@@ -349,9 +450,7 @@ class NevoBot:
             return True
 
         except Exception:
-            logger.exception(
-                "Could not save whisper"
-            )
+            logger.exception("Could not save whisper")
 
             self.send_message(
                 chat_id,
@@ -360,7 +459,7 @@ class NevoBot:
             )
             return True
 
-        # حذف متن اصلی نجوا از گروه
+        # حذف پیام اصلی که متن نجوا داخل آن است.
         deleted = self.delete_message(
             chat_id,
             message_id,
@@ -376,8 +475,6 @@ class NevoBot:
             )
             return True
 
-        # اعلان و دکمه در همان گروه قرار می‌گیرند.
-        # به پیوی مخاطب هیچ پیامی ارسال نمی‌شود.
         keyboard = {
             "inline_keyboard": [
                 [
@@ -435,6 +532,7 @@ class NevoBot:
         """
 
         if not isinstance(callback_query, dict):
+            logger.warning("Invalid callback query received.")
             return
 
         callback_id = callback_query.get("id")
@@ -446,20 +544,27 @@ class NevoBot:
         user_id = user.get("id")
 
         if not callback_id or user_id is None:
+            logger.warning(
+                "Callback missing ID or user ID."
+            )
             return
 
         if not callback_data.startswith("whisper_open:"):
             return
 
-        # قالب دکمه:
+        # قالب:
         # whisper_open:<whisper_id>:<page>
         try:
             parts = callback_data.split(":")
-            whisper_id = int(parts[1])
-            page = int(parts[2]) if len(parts) > 2 else 0
 
-            if page < 0:
-                raise ValueError("page")
+            if len(parts) != 3:
+                raise ValueError("Invalid callback format")
+
+            whisper_id = int(parts[1])
+            page = int(parts[2])
+
+            if whisper_id <= 0 or page < 0:
+                raise ValueError("Invalid whisper ID or page")
 
         except (ValueError, IndexError):
             self.answer_callback(
@@ -469,17 +574,34 @@ class NevoBot:
             )
             return
 
-        # فقط مخاطب اصلی مجاز به خواندن نجواست.
-        whisper = open_whisper(
-            whisper_id,
-            user_id,
-        )
+        # فقط مخاطب اصلی اجازه دیدن متن را دارد.
+        try:
+            whisper = open_whisper(
+                whisper_id,
+                user_id,
+            )
+        except Exception:
+            logger.exception(
+                "Could not load whisper %s",
+                whisper_id,
+            )
+            self.answer_callback(
+                callback_id,
+                "فعلاً باز کردن نجوا ممکن نیست؛ دوباره تلاش کن.",
+                show_alert=True,
+            )
+            return
 
         if not whisper:
             self.answer_callback(
                 callback_id,
-                "این نجوا برای تو نیست.",
+                "این نجوا برای تو نیست یا دیگر در دسترس نیست.",
                 show_alert=True,
+            )
+            logger.info(
+                "Whisper access denied | whisper_id=%s | user_id=%s",
+                whisper_id,
+                user_id,
             )
             return
 
@@ -491,9 +613,8 @@ class NevoBot:
             whisper.get("sender_name") or "کاربر"
         )[:35]
 
-        # پنجره callback محدودیت طول دارد؛
-        # نجواهای بلند در چند بخش نمایش داده می‌شوند.
-        chunk_size = 125
+        # تقسیم متن برای نمایش در چند پنجره.
+        chunk_size = 100
 
         chunks = [
             whisper_text[index:index + chunk_size]
@@ -518,11 +639,7 @@ class NevoBot:
             f"{chunks[page]}"
         )
 
-        mark_whisper_opened(
-            whisper_id,
-            user_id,
-        )
-
+        # ابتدا پنجره باز می‌شود؛ سپس وضعیت خوانده‌شدن ثبت می‌شود.
         result = self.answer_callback(
             callback_id,
             alert_text,
@@ -530,14 +647,25 @@ class NevoBot:
         )
 
         if not result or not result.get("ok"):
-            # عمداً به پیوی پیام نمی‌فرستیم.
             logger.warning(
-                "Could not display whisper popup for user %s",
+                "Could not display whisper popup | "
+                "user_id=%s | whisper_id=%s",
                 user_id,
+                whisper_id,
             )
             return
 
-        # آماده‌کردن دکمه برای بخش بعدی نجوا
+        try:
+            mark_whisper_opened(
+                whisper_id,
+                user_id,
+            )
+        except Exception:
+            logger.exception(
+                "Could not mark whisper as opened | whisper_id=%s",
+                whisper_id,
+            )
+
         callback_message = (
             callback_query.get("message") or {}
         )
@@ -552,54 +680,65 @@ class NevoBot:
         )
 
         if (
-            callback_chat_id is not None
-            and callback_message_id is not None
+            callback_chat_id is None
+            or callback_message_id is None
         ):
-            if page + 1 < len(chunks):
-                next_keyboard = {
-                    "inline_keyboard": [
-                        [
-                            {
-                                "text": (
-                                    f"📩 ادامه نجوا "
-                                    f"({page + 2}/{len(chunks)})"
-                                ),
-                                "callback_data": (
-                                    f"whisper_open:"
-                                    f"{whisper_id}:"
-                                    f"{page + 1}"
-                                ),
-                            }
-                        ]
-                    ]
-                }
-            else:
-                # آخرین بخش نمایش داده شده؛ دکمه حذف می‌شود.
-                next_keyboard = {
-                    "inline_keyboard": []
-                }
+            logger.warning(
+                "Callback has no accessible message | whisper_id=%s",
+                whisper_id,
+            )
+            return
 
-            edit_result = self.api(
-                "editMessageReplyMarkup",
-                {
-                    "chat_id": callback_chat_id,
-                    "message_id": callback_message_id,
-                    "reply_markup": next_keyboard,
-                },
+        # اگر متن ادامه داشته باشد، دکمه بخش بعدی نمایش داده می‌شود.
+        if page + 1 < len(chunks):
+            next_keyboard = {
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": (
+                                f"📩 ادامه نجوا "
+                                f"({page + 2}/{len(chunks)})"
+                            ),
+                            "callback_data": (
+                                f"whisper_open:"
+                                f"{whisper_id}:"
+                                f"{page + 1}"
+                            ),
+                        }
+                    ]
+                ]
+            }
+        else:
+            next_keyboard = {
+                "inline_keyboard": []
+            }
+
+        edit_result = self.api(
+            "editMessageReplyMarkup",
+            {
+                "chat_id": callback_chat_id,
+                "message_id": callback_message_id,
+                "reply_markup": next_keyboard,
+            },
+        )
+
+        if (
+            not edit_result
+            or not edit_result.get("ok")
+        ):
+            logger.warning(
+                "Could not update whisper pagination button | "
+                "whisper_id=%s | response=%s",
+                whisper_id,
+                (
+                    edit_result.get("description")
+                    if isinstance(edit_result, dict)
+                    else "No response"
+                ),
             )
 
-            if (
-                not edit_result
-                or not edit_result.get("ok")
-            ):
-                logger.warning(
-                    "Could not update whisper pagination "
-                    "button for whisper %s",
-                    whisper_id,
-                )
-
     # ==========================================
-    #         Administrator Checking
+    #           Administrator Checking
     # ==========================================
 
     def is_group_admin(self, message):
@@ -617,10 +756,7 @@ class NevoBot:
         }:
             return False
 
-        if (
-            chat_id is None
-            or user_id is None
-        ):
+        if chat_id is None or user_id is None:
             return False
 
         result = self.api(
@@ -636,7 +772,12 @@ class NevoBot:
             or not result.get("ok")
         ):
             logger.warning(
-                "Could not verify group administrator"
+                "Could not verify group administrator | response=%s",
+                (
+                    result.get("description")
+                    if isinstance(result, dict)
+                    else "No response"
+                ),
             )
             return False
 
@@ -677,7 +818,7 @@ class NevoBot:
         )
 
     # ==========================================
-    #                 Moderation
+    #                  Moderation
     # ==========================================
 
     def handle_moderation(self, message):
@@ -689,7 +830,6 @@ class NevoBot:
         if chat_id is None:
             return False
 
-        # مدیریت ناظرها
         moderator_result = (
             self.moderators_feature.handle_message(
                 message
@@ -706,7 +846,6 @@ class NevoBot:
             )
             return True
 
-        # سکوت و رفع سکوت
         mute_result = (
             self.mute_feature.handle_message(
                 message
@@ -723,7 +862,6 @@ class NevoBot:
             )
             return True
 
-        # ضداسپم
         spam_result = (
             self.spam_feature.handle_message(
                 message
@@ -739,7 +877,6 @@ class NevoBot:
 
             return True
 
-        # بن، رفع بن و اخراج
         result = self.ban_feature.handle_message(
             message
         )
@@ -783,7 +920,7 @@ class NevoBot:
         return True
 
     # ==========================================
-    #              Message Handling
+    #                Message Handling
     # ==========================================
 
     def handle_message(self, message):
@@ -798,10 +935,7 @@ class NevoBot:
         chat_id = chat.get("id")
         user_id = user.get("id")
 
-        if (
-            chat_id is None
-            or user_id is None
-        ):
+        if chat_id is None or user_id is None:
             return
 
         first_name = user.get("first_name", "")
@@ -810,38 +944,46 @@ class NevoBot:
         text = message.get("text", "")
 
         # ثبت اطلاعات پایه کاربر
-        save_user(
-            user_id,
-            username,
-            first_name,
-        )
+        try:
+            save_user(
+                user_id,
+                username,
+                first_name,
+            )
+        except Exception:
+            logger.exception(
+                "Could not save user | user_id=%s",
+                user_id,
+            )
 
         # پیام‌های گروه
         if chat_type in {
             "group",
             "supergroup",
         }:
-            save_group(
-                chat_id,
-                chat.get("title", ""),
-            )
-
-            if text:
-                record_group_message(
+            try:
+                save_group(
                     chat_id,
-                    user_id,
+                    chat.get("title", ""),
+                )
+
+                if text:
+                    record_group_message(
+                        chat_id,
+                        user_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "Could not update group statistics | chat_id=%s",
+                    chat_id,
                 )
 
             # نجوا قبل از ضداسپم بررسی می‌شود.
-            if self.handle_whisper_message(
-                message
-            ):
+            if self.handle_whisper_message(message):
                 return
 
             # فرمان‌های مدیریتی و ضداسپم
-            if self.handle_moderation(
-                message
-            ):
+            if self.handle_moderation(message):
                 return
 
         if not isinstance(text, str):
@@ -923,7 +1065,7 @@ class NevoBot:
             )
 
     # ==========================================
-    #                   Main Loop
+    #                    Main Loop
     # ==========================================
 
     def run(self):
@@ -936,16 +1078,21 @@ class NevoBot:
 
         logger.info("NevoBot is starting...")
 
-        # بررسی توکن و ارتباط با بله
         info = self.api("getMe")
 
         if (
             not info
             or not info.get("ok")
         ):
+            description = (
+                info.get("description", "Unknown error")
+                if isinstance(info, dict)
+                else "No response"
+            )
+
             raise RuntimeError(
                 "اتصال به API بله ناموفق بود؛ "
-                "توکن و اتصال شبکه را بررسی کن."
+                f"توکن و اتصال شبکه را بررسی کن. علت: {description}"
             )
 
         bot_info = info.get("result") or {}
@@ -975,7 +1122,12 @@ class NevoBot:
                 or not updates.get("ok")
             ):
                 logger.warning(
-                    "getUpdates failed; retrying..."
+                    "getUpdates failed; retrying | response=%s",
+                    (
+                        updates.get("description")
+                        if isinstance(updates, dict)
+                        else "No response"
+                    ),
                 )
                 time.sleep(2)
                 continue
@@ -983,6 +1135,8 @@ class NevoBot:
             for update in updates.get("result", []):
                 update_id = update.get("update_id")
 
+                # قبل از پردازش، offset را جلو می‌بریم
+                # تا در اجرای بعدی آپدیت دوباره دریافت نشود.
                 if isinstance(update_id, int):
                     self.offset = max(
                         self.offset,
@@ -1002,12 +1156,13 @@ class NevoBot:
 
                 except Exception:
                     logger.exception(
-                        "Failed to process update"
+                        "Failed to process update | update_id=%s",
+                        update_id,
                     )
 
 
 # ==========================================
-#                Program Entry
+#                 Program Entry
 # ==========================================
 
 if __name__ == "__main__":
