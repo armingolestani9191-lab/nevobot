@@ -1,5 +1,7 @@
+
 import logging
 import time
+import random
 import requests
 
 from config import (
@@ -100,8 +102,6 @@ class NevoBot:
                 timeout=REQUEST_TIMEOUT,
             )
 
-            # ابتدا پاسخ را می‌خوانیم تا در صورت خطای HTTP
-            # متن واقعی خطای بله نیز در لاگ ثبت شود.
             try:
                 data = response.json()
             except ValueError:
@@ -120,8 +120,6 @@ class NevoBot:
                     ),
                 )
 
-                # اگر پاسخ JSON معتبر باشد، جزئیات خطا را
-                # به فراخواننده می‌دهیم.
                 if isinstance(data, dict):
                     return data
 
@@ -231,12 +229,7 @@ class NevoBot:
         text,
         show_alert=True,
     ):
-        """
-        پاسخ به کلیک دکمه.
-
-        در صورت شکست درخواست اول، خطای واقعی ثبت می‌شود
-        و یک بار درخواست ساده‌تر امتحان می‌شود.
-        """
+        """پاسخ به کلیک دکمه."""
 
         if not callback_id:
             logger.warning(
@@ -247,7 +240,6 @@ class NevoBot:
                 "description": "callback_query_id خالی است.",
             }
 
-        # محدودیت طول متن اعلان را رعایت می‌کنیم.
         callback_text = str(text or "")[:190]
 
         payload = {
@@ -277,8 +269,7 @@ class NevoBot:
             description,
         )
 
-        # تلاش دوم: حذف پارامتر اختیاری show_alert.
-        # اگر callback منقضی شده باشد، این تلاش هم ناموفق می‌شود.
+        # تلاش دوم بدون پارامتر اختیاری show_alert
         fallback_result = self.api(
             "answerCallbackQuery",
             {
@@ -359,9 +350,8 @@ class NevoBot:
 
     def handle_whisper_message(self, message):
         """
-        استفاده:
-        روی پیام مخاطب ریپلای کن و بنویس:
-        نجوا متن پیام
+        برای ارسال نجوا روی پیام مخاطب ریپلای کن
+        و بنویس: نجوا متن پیام
         """
 
         chat = message.get("chat") or {}
@@ -392,27 +382,34 @@ class NevoBot:
 
         whisper_text = text[len("نجوا"):].strip()
 
-        if not whisper_text:
-            self.send_message(
-                chat_id,
-                "💌 برای ارسال نجوا، روی پیام مخاطب "
-                "ریپلای کن و بنویس:\n"
-                "نجوا متن پیام",
-            )
-            return True
-
         replied_message = (
             message.get("reply_to_message") or {}
         )
 
+        # متن خالی یا دستور بدون ریپلای
+        if not whisper_text:
+            if not replied_message:
+                self.send_message(
+                    chat_id,
+                    "❓ برای نجوا باید روی پیام کاربر هدف ریپلای کنی.\n"
+                    "بعد بنویس: نجوا متن پیام",
+                )
+            else:
+                self.send_message(
+                    chat_id,
+                    "✍️ متن نجوا رو هم بعد از دستور بنویس.\n"
+                    "مثال: نجوا سلام!",
+                )
+            return True
+
         recipient = replied_message.get("from") or {}
         recipient_id = recipient.get("id")
 
+        # پیام هدف باید متعلق به یک کاربر واقعی باشد.
         if recipient_id is None:
             self.send_message(
                 chat_id,
-                "❌ برای ارسال نجوا باید روی پیام "
-                "شخص موردنظر ریپلای کنی.",
+                "❌ فقط می‌تونی برای یک کاربر واقعی نجوا بفرستی.",
             )
             return True
 
@@ -426,7 +423,7 @@ class NevoBot:
         if recipient.get("is_bot"):
             self.send_message(
                 chat_id,
-                "❌ نمی‌تونی برای ربات نجوا بفرستی.",
+                "❌ فقط می‌تونی برای یک کاربر واقعی نجوا بفرستی.",
             )
             return True
 
@@ -459,7 +456,7 @@ class NevoBot:
             )
             return True
 
-        # حذف پیام اصلی که متن نجوا داخل آن است.
+        # حذف پیام اصلی تا متن نجوا در گروه باقی نماند.
         deleted = self.delete_message(
             chat_id,
             message_id,
@@ -479,7 +476,7 @@ class NevoBot:
             "inline_keyboard": [
                 [
                     {
-                        "text": "💌 باز کردن نجوا",
+                        "text": "دیدم 👀",
                         "callback_data": (
                             f"whisper_open:{whisper_id}:0"
                         ),
@@ -490,11 +487,7 @@ class NevoBot:
 
         notification = self.send_message(
             chat_id,
-            (
-                "💌 یک نجوا ارسال شد!\n"
-                "فقط مخاطب اصلی می‌تونه متن رو "
-                "با دکمه زیر ببینه."
-            ),
+            "🤫 نجوا داری! بازش کن 👇🏻",
             keyboard,
         )
 
@@ -526,10 +519,7 @@ class NevoBot:
         return True
 
     def handle_callback_query(self, callback_query):
-        """
-        نمایش نجوا در پنجره کلیک‌کننده.
-        متن نجوا به گروه یا پیوی ارسال نمی‌شود.
-        """
+        """نمایش نجوا فقط به مخاطب اصلی."""
 
         if not isinstance(callback_query, dict):
             logger.warning("Invalid callback query received.")
@@ -552,7 +542,7 @@ class NevoBot:
         if not callback_data.startswith("whisper_open:"):
             return
 
-        # قالب:
+        # قالب callback:
         # whisper_open:<whisper_id>:<page>
         try:
             parts = callback_data.split(":")
@@ -574,7 +564,7 @@ class NevoBot:
             )
             return
 
-        # فقط مخاطب اصلی اجازه دیدن متن را دارد.
+        # این تابع فقط در صورت تطابق مخاطب، نجوا را برمی‌گرداند.
         try:
             whisper = open_whisper(
                 whisper_id,
@@ -613,7 +603,7 @@ class NevoBot:
             whisper.get("sender_name") or "کاربر"
         )[:35]
 
-        # تقسیم متن برای نمایش در چند پنجره.
+        # تقسیم متن برای نمایش در پنجره‌های جداگانه
         chunk_size = 100
 
         chunks = [
@@ -639,7 +629,7 @@ class NevoBot:
             f"{chunks[page]}"
         )
 
-        # ابتدا پنجره باز می‌شود؛ سپس وضعیت خوانده‌شدن ثبت می‌شود.
+        # نمایش متن نجوا در پنجره کلیک‌کننده
         result = self.answer_callback(
             callback_id,
             alert_text,
@@ -689,7 +679,7 @@ class NevoBot:
             )
             return
 
-        # اگر متن ادامه داشته باشد، دکمه بخش بعدی نمایش داده می‌شود.
+        # اگر نجوا چندبخشی است، دکمه ادامه نمایش داده می‌شود.
         if page + 1 < len(chunks):
             next_keyboard = {
                 "inline_keyboard": [
@@ -708,26 +698,42 @@ class NevoBot:
                     ]
                 ]
             }
-        else:
-            next_keyboard = {
-                "inline_keyboard": []
-            }
 
-        edit_result = self.api(
-            "editMessageReplyMarkup",
-            {
-                "chat_id": callback_chat_id,
-                "message_id": callback_message_id,
-                "reply_markup": next_keyboard,
-            },
-        )
+            edit_result = self.api(
+                "editMessageReplyMarkup",
+                {
+                    "chat_id": callback_chat_id,
+                    "message_id": callback_message_id,
+                    "reply_markup": next_keyboard,
+                },
+            )
+
+        else:
+            # پس از آخرین بخش، متن اعلان کاملاً به ایموجی تبدیل می‌شود.
+            final_emoji = random.choice([
+                "👍",
+                "✅",
+                "👌",
+            ])
+
+            edit_result = self.api(
+                "editMessageText",
+                {
+                    "chat_id": callback_chat_id,
+                    "message_id": callback_message_id,
+                    "text": final_emoji,
+                    "reply_markup": {
+                        "inline_keyboard": []
+                    },
+                },
+            )
 
         if (
             not edit_result
             or not edit_result.get("ok")
         ):
             logger.warning(
-                "Could not update whisper pagination button | "
+                "Could not update whisper notification | "
                 "whisper_id=%s | response=%s",
                 whisper_id,
                 (
@@ -1135,8 +1141,7 @@ class NevoBot:
             for update in updates.get("result", []):
                 update_id = update.get("update_id")
 
-                # قبل از پردازش، offset را جلو می‌بریم
-                # تا در اجرای بعدی آپدیت دوباره دریافت نشود.
+                # جلوگیری از پردازش دوباره آپدیت
                 if isinstance(update_id, int):
                     self.offset = max(
                         self.offset,
