@@ -1,4 +1,4 @@
-```python
+
 import logging
 import re
 import time
@@ -304,4 +304,3 @@ class MuteFeature:
 
     def handle(self, message):
         return self.handle_message(message)
-```
