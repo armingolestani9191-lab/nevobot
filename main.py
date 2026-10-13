@@ -20,6 +20,7 @@ from keyboards import main_menu
 from features.ban import BanFeature
 from features.moderators import ModeratorsFeature
 from features.mute import MuteFeature
+from features.spam import SpamFeature
 
 
 logging.basicConfig(
@@ -62,6 +63,12 @@ class NevoBot:
             is_authorized=self.is_moderation_authorized,
         )
 
+        # ضداسپم با معافیت ادمین واقعی و ناظر ثبت‌شده.
+        self.spam_feature = SpamFeature(
+            api=self.api,
+            is_authorized=self.is_moderation_authorized,
+        )
+
     def api(self, method, payload=None):
         """ارسال درخواست به API بله."""
         url = f"{self.base_url}/{method}"
@@ -77,7 +84,10 @@ class NevoBot:
             data = response.json()
 
             if not isinstance(data, dict):
-                logger.warning("Invalid API response: %s", method)
+                logger.warning(
+                    "Invalid API response: %s",
+                    method,
+                )
                 return None
 
             if not data.get("ok"):
@@ -90,7 +100,10 @@ class NevoBot:
             return data
 
         except (requests.RequestException, ValueError):
-            logger.exception("Request failed: %s", method)
+            logger.exception(
+                "Request failed: %s",
+                method,
+            )
             return None
 
     def send_message(self, chat_id, text, keyboard=None):
@@ -131,7 +144,9 @@ class NevoBot:
         )
 
         if not result or not result.get("ok"):
-            logger.warning("Could not verify group administrator")
+            logger.warning(
+                "Could not verify group administrator"
+            )
             return False
 
         member = result.get("result") or {}
@@ -167,8 +182,7 @@ class NevoBot:
         )
 
     def handle_moderation(self, message):
-        """پردازش مدیریت ناظرها، سکوت و سپس بن."""
-
+        """پردازش مدیریت ناظرها، سکوت، ضداسپم و بن."""
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
 
@@ -176,8 +190,8 @@ class NevoBot:
             return False
 
         # ۱. مدیریت ناظرها؛ فقط ادمین واقعی.
-        moderator_result = self.moderators_feature.handle_message(
-            message
+        moderator_result = (
+            self.moderators_feature.handle_message(message)
         )
 
         if moderator_result is not None:
@@ -203,7 +217,21 @@ class NevoBot:
             )
             return True
 
-        # ۳. بن، رفع بن و اخراج؛ ادمین واقعی یا ناظر.
+        # ۳. ضداسپم؛ تنظیمات و بررسی پیام‌های گروه.
+        spam_result = self.spam_feature.handle_message(message)
+
+        if spam_result is not None:
+            # فقط فرمان‌های تنظیم ضداسپم پیام متنی دارند.
+            # پیام‌های شناسایی‌شده به‌عنوان اسپم اخطار نمی‌گیرند.
+            if "text" in spam_result:
+                self.send_message(
+                    chat_id,
+                    spam_result["text"],
+                )
+
+            return True
+
+        # ۴. بن، رفع بن و اخراج؛ ادمین واقعی یا ناظر.
         result = self.ban_feature.handle_message(message)
 
         if result is None:
@@ -255,21 +283,34 @@ class NevoBot:
         text = message.get("text", "")
 
         # ثبت اطلاعات پایه کاربر.
-        save_user(user_id, username, first_name)
+        save_user(
+            user_id,
+            username,
+            first_name,
+        )
 
         if chat_type in {"group", "supergroup"}:
-            save_group(chat_id, chat.get("title", ""))
+            # ثبت گروه برای ذخیره تنظیمات قابلیت‌ها.
+            save_group(
+                chat_id,
+                chat.get("title", ""),
+            )
 
             if text:
                 record_group_message(chat_id, user_id)
 
+            # فرمان‌های مدیریتی و ضداسپم در این بخش پردازش می‌شوند.
             if self.handle_moderation(message):
                 return
 
         if not isinstance(text, str):
             return
 
-        command = text.split(maxsplit=1)[0].lower() if text else ""
+        command = (
+            text.split(maxsplit=1)[0].lower()
+            if text
+            else ""
+        )
 
         if chat_type == "private" and command in {
             "/start",
@@ -299,7 +340,10 @@ class NevoBot:
                 main_menu(),
             )
 
-        elif chat_type == "private" and text == "📊 مدیریت گروه‌ها":
+        elif (
+            chat_type == "private"
+            and text == "📊 مدیریت گروه‌ها"
+        ):
             self.send_message(
                 chat_id,
                 "📊 بخش مدیریت گروه‌ها در حال توسعه است.",
@@ -313,7 +357,10 @@ class NevoBot:
                 main_menu(),
             )
 
-        elif chat_type == "private" and text == "🤖 دستیار هوشمند":
+        elif (
+            chat_type == "private"
+            and text == "🤖 دستیار هوشمند"
+        ):
             self.send_message(
                 chat_id,
                 "🤖 این بخش هنوز فعال نشده است.",
@@ -367,7 +414,9 @@ class NevoBot:
                         update.get("message", {})
                     )
                 except Exception:
-                    logger.exception("Failed to process update")
+                    logger.exception(
+                        "Failed to process update"
+                    )
 
 
 if __name__ == "__main__":
