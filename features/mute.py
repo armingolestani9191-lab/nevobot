@@ -10,6 +10,116 @@ class MuteFeature:
         self.api = api
         self.is_authorized = is_authorized
 
+    # تبدیل اعداد فارسی و عربی به انگلیسی
+    def _normalize_digits(self, text):
+        translation = str.maketrans(
+            "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
+            "01234567890123456789",
+        )
+        return text.translate(translation)
+
+    # تشخیص دستور سکوت و رفع سکوت
+    def _is_mute_command(self, text):
+        text = self._normalize_digits(text.strip().lower())
+        normalized = " ".join(text.split())
+
+        unmute_commands = (
+            "حذف سکوت",
+            "سکوت حذف",
+            "رفع سکوت",
+            "لغو سکوت",
+            "آزاد",
+            "unmute",
+        )
+
+        if normalized in unmute_commands:
+            return "unmute", None, None
+
+        mute_commands = (
+            "سکوت",
+            "ساکت",
+            "سکوت کن",
+            "ساکت کن",
+            "mute",
+        )
+
+        if normalized in mute_commands:
+            return "mute", None, None
+
+        for command in sorted(mute_commands, key=len, reverse=True):
+            if normalized.startswith(command + " "):
+                remainder = normalized[len(command):].strip()
+
+                duration = self._parse_duration(remainder)
+
+                if duration is None:
+                    return (
+                        "mute",
+                        None,
+                        "مدت واردشده نامعتبر است. مثال: سکوت ۵ دقیقه",
+                    )
+
+                return "mute", duration, None
+
+        return None, None, None
+
+    # تبدیل مدت به ثانیه؛ حداکثر یک ساعت
+    def _parse_duration(self, text):
+        text = text.strip()
+
+        match = re.fullmatch(
+            r"(\d+)\s*"
+            r"(ثانیه|ثانیه‌ای|دقیقه|دقیقه‌ای|ساعت|ساعتی|"
+            r"second|seconds|minute|minutes|hour|hours)",
+            text,
+            re.IGNORECASE,
+        )
+
+        if not match:
+            return None
+
+        try:
+            amount = int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
+        unit = match.group(2).lower()
+
+        if amount <= 0:
+            return None
+
+        if unit.startswith("ثانیه") or unit.startswith("second"):
+            seconds = amount
+        elif unit.startswith("دقیقه") or unit.startswith("minute"):
+            seconds = amount * 60
+        else:
+            seconds = amount * 3600
+
+        if seconds > 3600:
+            return None
+
+        return seconds
+
+    # پیدا کردن فردی که روی پیامش ریپلای شده
+    def _get_target(self, message):
+        reply = message.get("reply_to_message")
+
+        if not isinstance(reply, dict):
+            return None
+
+        user = reply.get("from")
+
+        if not isinstance(user, dict):
+            return None
+
+        user_id = user.get("id")
+
+        if user_id is None:
+            return None
+
+        return user_id
+
+    # ارسال درخواست محدودسازی به API
     def _api_restrict(self, chat_id, user_id, muted, until_date=None):
         allowed = not muted
 
@@ -37,9 +147,9 @@ class MuteFeature:
             if result.get("ok") is not True:
                 error = result.get(
                     "description",
-                    "دلیل خطا مشخص نیست."
+                    "API درخواست را تأیید نکرد.",
                 )
-                return False, error
+                return False, str(error)
 
             return True, None
 
@@ -47,102 +157,21 @@ class MuteFeature:
             logger.exception("Mute API request failed")
             return False, str(exc)
 
-    def _get_target(self, message):
-        reply = message.get("reply_to_message")
-
-        if not isinstance(reply, dict):
-            return None
-
-        user = reply.get("from")
-
-        if not isinstance(user, dict):
-            return None
-
-        user_id = user.get("id")
-
-        if user_id is None:
-            return None
-
-        return user_id
-
-    def _parse_duration(self, text):
-        text = text.strip()
-
-        match = re.search(
-            r"(\d+)\s*(ثانیه|ثانیه‌ای|دقیقه|دقیقه‌ای|"
-            r"ساعت|ساعتی|second|seconds|minute|minutes|"
-            r"hour|hours)",
-            text,
-            re.IGNORECASE,
-        )
-
-        if not match:
-            return None
-
-        amount = int(match.group(1))
-        unit = match.group(2).lower()
-
-        if unit.startswith("ثانیه") or unit.startswith("second"):
-            seconds = amount
-        elif unit.startswith("دقیقه") or unit.startswith("minute"):
-            seconds = amount * 60
-        else:
-            seconds = amount * 3600
-
-        # حداکثر زمان سکوت: یک ساعت
-        if seconds <= 0 or seconds > 3600:
-            return None
-
-        return seconds
-
-    def _is_mute_command(self, text):
-        normalized = " ".join(text.strip().lower().split())
-
-        mute_commands = (
-            "سکوت",
-            "ساکت",
-            "سکوت کن",
-            "ساکت کن",
-            "mute",
-        )
-
-        unmute_commands = (
-            "حذف سکوت",
-            "سکوت حذف",
-            "رفع سکوت",
-            "لغو سکوت",
-            "آزاد",
-            "unmute",
-        )
-
-        if normalized in unmute_commands:
-            return "unmute", None
-
-        if normalized in mute_commands:
-            return "mute", None
-
-        for command in ("سکوت", "ساکت", "mute"):
-            if normalized.startswith(command + " "):
-                duration = self._parse_duration(
-                    normalized[len(command):]
-                )
-                return "mute", duration
-
-        return None, None
-
-    def handle(self, message):
+    # تابع اصلی؛ نام آن باید با main.py هماهنگ باشد
+    def handle_message(self, message):
         if not isinstance(message, dict):
-            return {"handled": False}
+            return None
 
         text = message.get("text", "")
 
         if not isinstance(text, str) or not text.strip():
-            return {"handled": False}
+            return None
 
-        action, duration = self._is_mute_command(text)
+        action, duration, duration_error = self._is_mute_command(text)
 
+        # پیام عادی گروه را به‌عنوان دستور مدیریت نشناس
         if action is None:
-            return {"handled": False}
+            return None
 
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
@@ -150,50 +179,51 @@ class MuteFeature:
 
         if chat_type not in ("group", "supergroup"):
             return {
-                "handled": True,
-                "text": "❌ این دستور فقط داخل گروه قابل استفاده است.",
+                "text": "❌ این دستور فقط داخل گروه قابل استفاده است."
             }
 
         if chat_id is None:
             return {
-                "handled": True,
-                "text": "❌ اطلاعات گروه دریافت نشد.",
+                "text": "❌ شناسه گروه دریافت نشد."
             }
 
         target_id = self._get_target(message)
 
         if target_id is None:
             return {
-                "handled": True,
                 "text": (
-                    "⚠️ برای استفاده از این دستور، "
-                    "روی پیام فرد موردنظر ریپلای کن."
-                ),
+                    "⚠️ برای استفاده از این دستور، روی پیام "
+                    "فرد موردنظر ریپلای کن."
+                )
             }
 
         sender = message.get("from") or {}
-        sender_id = sender.get("id")
 
-        if sender_id is None:
+        if sender.get("id") is None:
             return {
-                "handled": True,
-                "text": "❌ اطلاعات اجراکننده دستور دریافت نشد.",
+                "text": "❌ اطلاعات اجراکننده دستور دریافت نشد."
             }
 
+        # اعتبارسنجی با همان ساختاری که main.py انتظار دارد
         try:
-            authorized = self.is_authorized(chat_id, sender_id)
+            authorized = self.is_authorized(message)
         except Exception:
-            logger.exception("Authorization check failed")
+            logger.exception("Mute authorization check failed")
             return {
-                "handled": True,
-                "text": "❌ بررسی دسترسی انجام نشد.",
+                "text": "❌ هنگام بررسی دسترسی خطایی رخ داد."
             }
 
         if not authorized:
             return {
-                "handled": True,
-                "text": "⛔ اجازه اجرای این دستور را نداری.",
+                "text": "⛔ اجازه اجرای این دستور را نداری."
             }
+
+        # مدت نامعتبر نباید به سکوت دائمی تبدیل شود
+        if duration_error:
+            return {"text": f"❌ {duration_error}"}
+
+        # جلوگیری از سکوت‌کردن خود ربات در صورت مشخص بودن شناسه
+        # شناسه ربات در این کلاس در دسترس نیست؛ کنترل اصلی با API است.
 
         if action == "mute":
             until_date = None
@@ -211,25 +241,29 @@ class MuteFeature:
             if not success:
                 logger.error("Mute failed: %s", error)
                 return {
-                    "handled": True,
                     "text": (
                         "❌ سکوت اعمال نشد.\n"
                         f"دلیل API: {error}"
-                    ),
+                    )
                 }
 
             if duration is not None:
+                if duration < 60:
+                    duration_text = f"{duration} ثانیه"
+                elif duration % 3600 == 0:
+                    duration_text = f"{duration // 3600} ساعت"
+                else:
+                    duration_text = f"{duration // 60} دقیقه"
+
                 return {
-                    "handled": True,
                     "text": (
-                        "🔇 درخواست سکوت با موفقیت ثبت شد.\n"
-                        f"مدت: {duration // 60 or 1} دقیقه"
-                    ),
+                        "🔇 درخواست سکوت با موفقیت تأیید شد.\n"
+                        f"مدت: {duration_text}"
+                    )
                 }
 
             return {
-                "handled": True,
-                "text": "🔇 درخواست سکوت با موفقیت ثبت شد.",
+                "text": "🔇 درخواست سکوت دائمی ثبت شد."
             }
 
         if action == "unmute":
@@ -242,16 +276,14 @@ class MuteFeature:
             if not success:
                 logger.error("Unmute failed: %s", error)
                 return {
-                    "handled": True,
                     "text": (
                         "❌ رفع سکوت انجام نشد.\n"
                         f"دلیل API: {error}"
-                    ),
+                    )
                 }
 
             return {
-                "handled": True,
-                "text": "🔊 درخواست رفع سکوت با موفقیت ثبت شد.",
+                "text": "🔊 درخواست رفع سکوت با موفقیت تأیید شد."
             }
 
-        return {"handled": False}
+        return None
