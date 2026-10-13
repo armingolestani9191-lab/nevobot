@@ -19,6 +19,7 @@ from database import (
 from keyboards import main_menu
 from features.ban import BanFeature
 from features.moderators import ModeratorsFeature
+from features.mute import MuteFeature
 
 
 logging.basicConfig(
@@ -33,7 +34,7 @@ class NevoBot:
     def __init__(self):
         if not BOT_TOKEN:
             raise RuntimeError(
-                "توکن ربات در config.py تنظیم نشده است."
+                "توکن ربات در تنظیمات تنظیم نشده است."
             )
 
         self.base_url = f"{API_BASE_URL}/bot{BOT_TOKEN}"
@@ -49,8 +50,14 @@ class NevoBot:
             is_group_admin=self.is_group_admin,
         )
 
-        # ادمین واقعی و ناظر ثبت‌شده می‌توانند از این بخش استفاده کنند.
+        # ادمین واقعی و ناظر ثبت‌شده می‌توانند بن را مدیریت کنند.
         self.ban_feature = BanFeature(
+            api=self.api,
+            is_authorized=self.is_moderation_authorized,
+        )
+
+        # سکوت و رفع سکوت با همان سطح دسترسی ادمین یا ناظر.
+        self.mute_feature = MuteFeature(
             api=self.api,
             is_authorized=self.is_moderation_authorized,
         )
@@ -139,9 +146,8 @@ class NevoBot:
 
     def is_moderation_authorized(self, message):
         """
-        اجازه مدیریت اعضا برای ادمین واقعی یا ناظر همان گروه.
-        این تابع اجازه مدیریت ناظرها را نمی‌دهد؛ آن کار فقط
-        در ModeratorsFeature و با بررسی ادمین واقعی انجام می‌شود.
+        ادمین واقعی یا ناظر ثبت‌شده همان گروه مجاز است.
+        مدیریت ناظرها همچنان فقط برای ادمین واقعی است.
         """
         if self.is_group_admin(message):
             return True
@@ -161,14 +167,15 @@ class NevoBot:
         )
 
     def handle_moderation(self, message):
-        """پردازش اول دستورهای ناظر و سپس دستورهای بن."""
+        """پردازش مدیریت ناظرها، سکوت و سپس بن."""
+
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
 
         if chat_id is None:
             return False
 
-        # اول مدیریت ناظرها؛ فقط ادمین واقعی می‌تواند تغییر دهد.
+        # ۱. مدیریت ناظرها؛ فقط ادمین واقعی.
         moderator_result = self.moderators_feature.handle_message(
             message
         )
@@ -183,7 +190,20 @@ class NevoBot:
             )
             return True
 
-        # بعد بن، آنبن و کیک؛ ادمین واقعی یا ناظر مجاز.
+        # ۲. سکوت و رفع سکوت؛ ادمین واقعی یا ناظر همین گروه.
+        mute_result = self.mute_feature.handle_message(message)
+
+        if mute_result is not None:
+            self.send_message(
+                chat_id,
+                mute_result.get(
+                    "text",
+                    "عملیات سکوت انجام نشد.",
+                ),
+            )
+            return True
+
+        # ۳. بن، رفع بن و اخراج؛ ادمین واقعی یا ناظر.
         result = self.ban_feature.handle_message(message)
 
         if result is None:
@@ -234,7 +254,7 @@ class NevoBot:
         chat_type = chat.get("type", "")
         text = message.get("text", "")
 
-        # ثبت اطلاعات پایه کاربر
+        # ثبت اطلاعات پایه کاربر.
         save_user(user_id, username, first_name)
 
         if chat_type in {"group", "supergroup"}:
@@ -273,7 +293,7 @@ class NevoBot:
                     "📚 راهنمای NevoBot\n\n"
                     "ربات را به گروه اضافه کن و مجوزهای "
                     "موردنیاز را به آن بده.\n"
-                    "برای استفاده از بن و مدیریت اعضا، "
+                    "برای استفاده از سکوت، بن و مدیریت اعضا، "
                     "ربات باید مجوزهای لازم را داشته باشد."
                 ),
                 main_menu(),
@@ -313,6 +333,7 @@ class NevoBot:
             )
 
         bot_info = info.get("result") or {}
+
         logger.info(
             "Bot connected: @%s",
             bot_info.get("username", "unknown"),
