@@ -1,141 +1,16 @@
-
 import logging
 import re
-import threading
 import time
-
-from database import get_connection
 
 logger = logging.getLogger("NevoBot.Mute")
 
 
 class MuteFeature:
-    CHECK_INTERVAL = 2
-    MAX_DURATION = 3600
-
     def __init__(self, api, is_authorized):
         self.api = api
         self.is_authorized = is_authorized
 
-        self._db_lock = threading.Lock()
-        self._worker_started = False
-
-        # جدول زمان پایان سکوت؛ در همان دیتابیس اصلی ربات
-        self._init_mute_table()
-
-        # بررسی خودکار سکوت‌های منقضی‌شده
-        self._start_expiration_worker()
-
-    # --------------------------------------------------
-    # دیتابیس زمان پایان سکوت
-    # --------------------------------------------------
-
-    def _init_mute_table(self):
-        with get_connection() as connection:
-            connection.execute("""
-                CREATE TABLE IF NOT EXISTS mute_expirations (
-                    chat_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    expires_at INTEGER NOT NULL,
-                    PRIMARY KEY (chat_id, user_id)
-                )
-            """)
-            connection.commit()
-
-    def _save_expiration(self, chat_id, user_id, expires_at):
-        with self._db_lock:
-            with get_connection() as connection:
-                connection.execute("""
-                    INSERT INTO mute_expirations (
-                        chat_id, user_id, expires_at
-                    )
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(chat_id, user_id)
-                    DO UPDATE SET expires_at = excluded.expires_at
-                """, (
-                    str(chat_id),
-                    str(user_id),
-                    int(expires_at),
-                ))
-                connection.commit()
-
-    def _remove_expiration(self, chat_id, user_id):
-        with self._db_lock:
-            with get_connection() as connection:
-                connection.execute("""
-                    DELETE FROM mute_expirations
-                    WHERE chat_id = ? AND user_id = ?
-                """, (str(chat_id), str(user_id)))
-                connection.commit()
-
-    def _get_expired_mutes(self):
-        with self._db_lock:
-            with get_connection() as connection:
-                rows = connection.execute("""
-                    SELECT chat_id, user_id, expires_at
-                    FROM mute_expirations
-                    WHERE expires_at <= ?
-                """, (int(time.time()),)).fetchall()
-
-                return [dict(row) for row in rows]
-
-    def _start_expiration_worker(self):
-        if self._worker_started:
-            return
-
-        worker = threading.Thread(
-            target=self._expiration_worker,
-            name="NevoBot-MuteExpiration",
-            daemon=True,
-        )
-        worker.start()
-        self._worker_started = True
-
-    def _expiration_worker(self):
-        logger.info("Mute expiration worker started")
-
-        while True:
-            try:
-                expired_mutes = self._get_expired_mutes()
-
-                for item in expired_mutes:
-                    chat_id = item["chat_id"]
-                    user_id = item["user_id"]
-
-                    success, error = self._api_restrict(
-                        chat_id=chat_id,
-                        user_id=user_id,
-                        muted=False,
-                    )
-
-                    if success:
-                        self._remove_expiration(chat_id, user_id)
-
-                        logger.info(
-                            "Timed mute expired | chat=%s user=%s",
-                            chat_id,
-                            user_id,
-                        )
-                    else:
-                        # اگر API موقتاً خطا داد، رکورد باقی می‌ماند
-                        # تا در دور بعدی دوباره امتحان شود.
-                        logger.warning(
-                            "Timed unmute failed | chat=%s user=%s "
-                            "error=%s",
-                            chat_id,
-                            user_id,
-                            error,
-                        )
-
-            except Exception:
-                logger.exception("Mute expiration worker error")
-
-            time.sleep(self.CHECK_INTERVAL)
-
-    # --------------------------------------------------
-    # نرمال‌سازی و تشخیص دستور
-    # --------------------------------------------------
-
+    # تبدیل اعداد فارسی و عربی به انگلیسی
     def _normalize_digits(self, text):
         translation = str.maketrans(
             "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
@@ -143,71 +18,10 @@ class MuteFeature:
         )
         return text.translate(translation)
 
-    def _normalize_text(self, text):
-        text = self._normalize_digits(text.strip().lower())
-
-        # یکسان‌سازی حروف عربی و فارسی
-        text = text.replace("ي", "ی").replace("ك", "ک")
-        text = " ".join(text.split())
-
-        return text
-
-    def _parse_duration(self, text):
-        text = self._normalize_text(text)
-
-        # پشتیبانی از شکل‌های رایج دستور:
-        # سکوت 5 دقیقه
-        # سکوت برای 5 دقیقه
-        # سکوت به مدت 5 دقیقه
-        text = re.sub(r"^(?:برای|به مدت)\s+", "", text)
-
-        match = re.fullmatch(
-            r"(\d+)\s*"
-            r"(ثانیه|ثانیه‌ای|ثانیه ای|ثانیهها|"
-            r"دقیقه|دقیقه‌ای|دقیقه ای|دیقه|دیقه‌ای|دیقه ای|"
-            r"ساعت|ساعتی|ساعت ای|"
-            r"seconds?|secs?|s|"
-            r"minutes?|mins?|m|"
-            r"hours?|hrs?|h)",
-            text,
-            re.IGNORECASE,
-        )
-
-        if not match:
-            return None
-
-        amount = int(match.group(1))
-        unit = match.group(2).lower().replace(" ", "")
-
-        if amount <= 0:
-            return None
-
-        if (
-            unit.startswith("ثانیه")
-            or unit.startswith("sec")
-            or unit == "s"
-        ):
-            seconds = amount
-
-        elif (
-            unit.startswith("دقیقه")
-            or unit.startswith("دیقه")
-            or unit.startswith("min")
-            or unit == "m"
-        ):
-            seconds = amount * 60
-
-        else:
-            seconds = amount * 3600
-
-        # کمتر از ۳۰ ثانیه یا بیشتر از یک ساعت پذیرفته نمی‌شود
-        if seconds < 30 or seconds > self.MAX_DURATION:
-            return None
-
-        return seconds
-
+    # تشخیص دستور سکوت و رفع سکوت
     def _is_mute_command(self, text):
-        text = self._normalize_text(text)
+        text = self._normalize_digits(text.strip().lower())
+        text = " ".join(text.split())
 
         unmute_commands = (
             "حذف سکوت",
@@ -222,10 +36,10 @@ class MuteFeature:
             return "unmute", None, None
 
         mute_commands = (
-            "سکوت کن",
-            "ساکت کن",
             "سکوت",
             "ساکت",
+            "سکوت کن",
+            "ساکت کن",
             "mute",
         )
 
@@ -233,28 +47,54 @@ class MuteFeature:
             return "mute", None, None
 
         for command in sorted(mute_commands, key=len, reverse=True):
-            if not text.startswith(command + " "):
-                continue
+            if text.startswith(command + " "):
+                remainder = text[len(command):].strip()
+                duration = self._parse_duration(remainder)
 
-            remainder = text[len(command):].strip()
-            duration = self._parse_duration(remainder)
+                if duration is None:
+                    return (
+                        "mute",
+                        None,
+                        "مدت نامعتبر است. مثال: سکوت ۵ دقیقه",
+                    )
 
-            if duration is None:
-                return (
-                    "mute",
-                    None,
-                    "مدت نامعتبر است. مثال‌ها: "
-                    "سکوت 5 دقیقه، سکوت 5 دیقه، سکوت 30 ثانیه",
-                )
-
-            return "mute", duration, None
+                return "mute", duration, None
 
         return None, None, None
 
-    # --------------------------------------------------
-    # پیدا کردن کاربر هدف
-    # --------------------------------------------------
+    # مدت سکوت؛ حداکثر یک ساعت
+    def _parse_duration(self, text):
+        match = re.fullmatch(
+            r"(\d+)\s*"
+            r"(ثانیه|ثانیه‌ای|دقیقه|دقیقه‌ای|ساعت|ساعتی|"
+            r"second|seconds|minute|minutes|hour|hours)",
+            text.strip(),
+            re.IGNORECASE,
+        )
 
+        if not match:
+            return None
+
+        amount = int(match.group(1))
+        unit = match.group(2).lower()
+
+        if amount <= 0:
+            return None
+
+        if unit.startswith("ثانیه") or unit.startswith("second"):
+            seconds = amount
+        elif unit.startswith("دقیقه") or unit.startswith("minute"):
+            seconds = amount * 60
+        else:
+            seconds = amount * 3600
+
+        # API ممکن است محدودیت کمتر از ۳۰ ثانیه را دائمی تلقی کند.
+        if seconds < 30 or seconds > 3600:
+            return None
+
+        return seconds
+
+    # استخراج کاربری که روی پیامش ریپلای شده
     def _get_target(self, message):
         reply = message.get("reply_to_message")
 
@@ -266,18 +106,19 @@ class MuteFeature:
         if not isinstance(user, dict):
             return None
 
-        return user.get("id")
+        user_id = user.get("id")
 
-    # --------------------------------------------------
-    # متد اصلی محدودسازی API
-    # --------------------------------------------------
+        if user_id is None:
+            return None
 
-    def _api_restrict(self, chat_id, user_id, muted):
+        return user_id
+
+    # اعمال سکوت یا رفع سکوت از طریق API بله
+    def _api_restrict(self, chat_id, user_id, muted, until_date=None):
         allowed = not muted
 
-        # عمداً until_date ارسال نمی‌کنیم.
-        # سکوت واقعی با همان متد API انجام می‌شود و زمان پایان
-        # توسط زمان‌بند دیتابیس مدیریت خواهد شد.
+        # پارامترهای مجوز به‌صورت مستقیم ارسال می‌شوند.
+        # از ساختار تو‌در‌توی permissions استفاده نمی‌کنیم.
         payload = {
             "chat_id": chat_id,
             "user_id": user_id,
@@ -287,11 +128,17 @@ class MuteFeature:
             "can_add_web_page_previews": allowed,
         }
 
+        if until_date is not None:
+            payload["until_date"] = int(until_date)
+
         try:
             result = self.api("restrictChatMember", payload)
 
             if not isinstance(result, dict):
-                return False, "پاسخ معتبر از API دریافت نشد."
+                return False, (
+                    "پاسخ معتبر از API دریافت نشد؛ "
+                    "خطای درخواست را در لاگ ربات بررسی کن."
+                )
 
             if result.get("ok") is not True:
                 error = result.get(
@@ -310,16 +157,24 @@ class MuteFeature:
 
                 return False, str(error)
 
+            logger.info(
+                "%s successful | chat=%s user=%s",
+                "Mute" if muted else "Unmute",
+                chat_id,
+                user_id,
+            )
+
             return True, None
 
         except Exception as exc:
-            logger.exception("Restriction API request failed")
+            logger.exception(
+                "Restriction request crashed | chat=%s user=%s",
+                chat_id,
+                user_id,
+            )
             return False, str(exc)
 
-    # --------------------------------------------------
-    # اجرای دستورات سکوت و رفع سکوت
-    # --------------------------------------------------
-
+    # تابع اصلی؛ سازگار با main.py فعلی
     def handle_message(self, message):
         if not isinstance(message, dict):
             return None
@@ -331,6 +186,7 @@ class MuteFeature:
 
         action, duration, duration_error = self._is_mute_command(text)
 
+        # پیام عادی را به‌عنوان دستور مدیریت دریافت نکن
         if action is None:
             return None
 
@@ -360,33 +216,34 @@ class MuteFeature:
             }
 
         sender = message.get("from") or {}
-        sender_id = sender.get("id")
 
-        if sender_id is None:
+        if sender.get("id") is None:
             return {"text": "❌ اطلاعات اجراکننده دستور دریافت نشد."}
 
-        if str(sender_id) == str(target_id):
-            return {
-                "text": "⚠️ نمی‌توانی روی پیام خودت این دستور را اجرا کنی."
-            }
+        if str(sender["id"]) == str(target_id):
+            return {"text": "⚠️ نمی‌توانی روی پیام خودت این دستور را اجرا کنی."}
 
+        # بررسی دسترسی با همان تابعی که main.py به کلاس می‌دهد
         try:
             authorized = self.is_authorized(message)
         except Exception:
             logger.exception("Mute authorization check failed")
-            return {
-                "text": "❌ بررسی دسترسی ناموفق بود؛ لاگ را بررسی کن."
-            }
+            return {"text": "❌ بررسی دسترسی ناموفق بود؛ لاگ را بررسی کن."}
 
         if not authorized:
             return {"text": "⛔ اجازه اجرای این دستور را نداری."}
 
-        # ---------------- سکوت ----------------
         if action == "mute":
+            until_date = None
+
+            if duration is not None:
+                until_date = int(time.time()) + duration
+
             success, error = self._api_restrict(
                 chat_id=chat_id,
                 user_id=target_id,
                 muted=True,
+                until_date=until_date,
             )
 
             if not success:
@@ -398,53 +255,7 @@ class MuteFeature:
                 }
 
             if duration is None:
-                # سکوت دائمی؛ زمان پایان قبلی باید حذف شود.
-                try:
-                    self._remove_expiration(chat_id, target_id)
-                except Exception:
-                    logger.exception("Could not clear mute expiration")
-                    return {
-                        "text": (
-                            "⚠️ سکوت اعمال شد، اما ذخیره وضعیت زمان‌بندی "
-                            "ناموفق بود. دیتابیس را بررسی کن."
-                        )
-                    }
-
-                return {"text": "🔇 سکوت دائمی با موفقیت اعمال شد."}
-
-            expires_at = int(time.time()) + duration
-
-            try:
-                self._save_expiration(
-                    chat_id,
-                    target_id,
-                    expires_at,
-                )
-            except Exception:
-                logger.exception("Could not save mute expiration")
-
-                # اگر زمان پایان ذخیره نشد، سعی کن کاربر را آزاد کنی
-                rollback_ok, rollback_error = self._api_restrict(
-                    chat_id=chat_id,
-                    user_id=target_id,
-                    muted=False,
-                )
-
-                if rollback_ok:
-                    return {
-                        "text": (
-                            "❌ زمان پایان سکوت ذخیره نشد؛ "
-                            "محدودیت کاربر برداشته شد. دوباره تلاش کن."
-                        )
-                    }
-
-                return {
-                    "text": (
-                        "⚠️ سکوت اعمال شد اما زمان پایان ذخیره نشد "
-                        "و رفع محدودیت خودکار هم ناموفق بود.\n"
-                        f"خطا: {rollback_error}"
-                    )
-                }
+                return {"text": "🔇 سکوت دائمی اعمال شد."}
 
             if duration % 3600 == 0:
                 duration_text = f"{duration // 3600} ساعت"
@@ -455,13 +266,11 @@ class MuteFeature:
 
             return {
                 "text": (
-                    "🔇 سکوت مدت‌دار اعمال شد.\n"
-                    f"⏱ مدت: {duration_text}\n"
-                    "🔊 بعد از پایان زمان، سکوت خودکار برداشته می‌شود."
+                    "🔇 سکوت با موفقیت اعمال شد.\n"
+                    f"⏱ مدت: {duration_text}"
                 )
             }
 
-        # ---------------- رفع سکوت ----------------
         if action == "unmute":
             success, error = self._api_restrict(
                 chat_id=chat_id,
@@ -477,17 +286,6 @@ class MuteFeature:
                     )
                 }
 
-            try:
-                self._remove_expiration(chat_id, target_id)
-            except Exception:
-                logger.exception("Could not remove mute expiration")
-                return {
-                    "text": (
-                        "🔊 محدودیت برداشته شد، اما حذف زمان پایان "
-                        "از دیتابیس ناموفق بود."
-                    )
-                }
-
-            return {"text": "🔊 سکوت کاربر با موفقیت برداشته شد."}
+            return {"text": "🔊 درخواست رفع سکوت موفق بود."}
 
         return None
