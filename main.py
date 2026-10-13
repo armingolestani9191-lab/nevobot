@@ -485,9 +485,16 @@ class NevoBot:
             ]
         }
 
+        # فقط متن اعلان تغییر کرده است:
+        # آیدی عددی مخاطب ریپلای‌شده داخل uid قرار می‌گیرد.
+        notification_text = (
+            f"🤫 [👇](uid:{recipient_id}) "
+            f"نجوا داری! بازش کن"
+        )
+
         notification = self.send_message(
             chat_id,
-            "🤫 نجوا داری! بازش کن 👇🏻",
+            notification_text,
             keyboard,
         )
 
