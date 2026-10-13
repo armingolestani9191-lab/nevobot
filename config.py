@@ -7,7 +7,7 @@
 BOT_TOKEN = "1954705755:v_Lh_gczzr0I3fKJPshwhxMRgoqhDQ2aBV0"
 
 # آیدی عددی ادمین اصلی
-ADMIN_ID = 
+ADMIN_ID = 123456789
 
 # آیدی ادمین‌های اضافی (در صورت نیاز)
 ADMIN_IDS = {
