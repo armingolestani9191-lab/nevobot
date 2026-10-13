@@ -1,3 +1,4 @@
+
 import logging
 import time
 import requests
@@ -229,7 +230,7 @@ class NevoBot:
         return "کاربر"
 
     def discard_whisper(self, whisper_id):
-        """حذف نجوا در صورت شکست ارسال."""
+        """حذف نجوا در صورت شکست ارسال اعلان گروه."""
 
         try:
             with get_connection() as connection:
@@ -327,9 +328,7 @@ class NevoBot:
             )
             return True
 
-        sender_name = self.get_display_name(
-            sender
-        )
+        sender_name = self.get_display_name(sender)
 
         # ذخیره نجوا در دیتابیس
         try:
@@ -361,16 +360,14 @@ class NevoBot:
             )
             return True
 
-        # حذف متن نجوا از گروه
+        # حذف متن اصلی نجوا از گروه
         deleted = self.delete_message(
             chat_id,
             message_id,
         )
 
         if not deleted:
-            self.discard_whisper(
-                whisper_id
-            )
+            self.discard_whisper(whisper_id)
 
             self.send_message(
                 chat_id,
@@ -379,101 +376,90 @@ class NevoBot:
             )
             return True
 
-        # دکمه باز کردن نجوا
+        # اعلان و دکمه در همان گروه قرار می‌گیرند.
+        # به پیوی مخاطب هیچ پیامی ارسال نمی‌شود.
         keyboard = {
             "inline_keyboard": [
                 [
                     {
                         "text": "💌 باز کردن نجوا",
                         "callback_data": (
-                            f"whisper_open:{whisper_id}"
+                            f"whisper_open:{whisper_id}:0"
                         ),
                     }
                 ]
             ]
         }
 
-        # اعلان خصوصی؛ متن نجوا در اعلان نیست.
-        notification = self.api(
-            "sendMessage",
-            {
-                "chat_id": recipient_id,
-                "text": (
-                    "💌 یه نجوای جدید داری!\n\n"
-                    "برای دیدن پیام، روی دکمه زیر بزن."
-                ),
-                "reply_markup": keyboard,
-            },
+        notification = self.send_message(
+            chat_id,
+            (
+                "💌 یک نجوا ارسال شد!\n"
+                "فقط مخاطب اصلی می‌تونه متن رو "
+                "با دکمه زیر ببینه."
+            ),
+            keyboard,
         )
 
         if (
             not notification
             or not notification.get("ok")
         ):
-            self.discard_whisper(
-                whisper_id
+            self.discard_whisper(whisper_id)
+
+            logger.error(
+                "Could not post whisper button in group %s",
+                chat_id,
             )
 
             self.send_message(
                 chat_id,
-                "⚠️ پیام گروه حذف شد، اما نتونستم "
-                "اعلان خصوصی بفرستم.\n"
-                "مخاطب باید اول وارد گفت‌وگوی خصوصی "
-                "ربات بشه و /start رو بزنه؛ "
-                "بعد دوباره نجوا رو ارسال کن.",
+                "❌ ارسال دکمه نجوا در گروه ناموفق بود.",
             )
-
             return True
 
         logger.info(
-            "Whisper %s sent from %s to %s",
+            "Whisper %s posted in group %s from %s to %s",
             whisper_id,
+            chat_id,
             sender_id,
             recipient_id,
         )
 
         return True
 
-    def handle_callback_query(
-        self,
-        callback_query,
-    ):
-        """رسیدگی به کلیک دکمه بازکردن نجوا."""
+    def handle_callback_query(self, callback_query):
+        """
+        نمایش نجوا در پنجره کلیک‌کننده.
+        متن نجوا به گروه یا پیوی ارسال نمی‌شود.
+        """
 
-        if not isinstance(
-            callback_query,
-            dict,
-        ):
+        if not isinstance(callback_query, dict):
             return
 
         callback_id = callback_query.get("id")
-
         callback_data = str(
             callback_query.get("data", "")
         )
 
-        user = (
-            callback_query.get("from") or {}
-        )
-
+        user = callback_query.get("from") or {}
         user_id = user.get("id")
 
-        if (
-            not callback_id
-            or user_id is None
-        ):
+        if not callback_id or user_id is None:
             return
 
-        if not callback_data.startswith(
-            "whisper_open:"
-        ):
+        if not callback_data.startswith("whisper_open:"):
             return
 
-        # بررسی شناسه نجوا
+        # قالب دکمه:
+        # whisper_open:<whisper_id>:<page>
         try:
-            whisper_id = int(
-                callback_data.split(":", 1)[1]
-            )
+            parts = callback_data.split(":")
+            whisper_id = int(parts[1])
+            page = int(parts[2]) if len(parts) > 2 else 0
+
+            if page < 0:
+                raise ValueError("page")
 
         except (ValueError, IndexError):
             self.answer_callback(
@@ -483,7 +469,7 @@ class NevoBot:
             )
             return
 
-        # فقط دریافت‌کننده اصلی مجاز است.
+        # فقط مخاطب اصلی مجاز به خواندن نجواست.
         whisper = open_whisper(
             whisper_id,
             user_id,
@@ -503,11 +489,33 @@ class NevoBot:
 
         sender_name = str(
             whisper.get("sender_name") or "کاربر"
-        )
+        )[:35]
+
+        # پنجره callback محدودیت طول دارد؛
+        # نجواهای بلند در چند بخش نمایش داده می‌شوند.
+        chunk_size = 125
+
+        chunks = [
+            whisper_text[index:index + chunk_size]
+            for index in range(
+                0,
+                len(whisper_text),
+                chunk_size,
+            )
+        ] or ["(متن خالی است)"]
+
+        if page >= len(chunks):
+            self.answer_callback(
+                callback_id,
+                "این نجوا تمام شده است.",
+                show_alert=True,
+            )
+            return
 
         alert_text = (
-            f"نجوا از طرف {sender_name}\n\n"
-            f"{whisper_text}"
+            f"نجوا از طرف {sender_name} "
+            f"({page + 1}/{len(chunks)})\n\n"
+            f"{chunks[page]}"
         )
 
         mark_whisper_opened(
@@ -521,18 +529,74 @@ class NevoBot:
             show_alert=True,
         )
 
-        # در صورت شکست پنجره، پیام فقط خصوصی ارسال می‌شود.
         if not result or not result.get("ok"):
+            # عمداً به پیوی پیام نمی‌فرستیم.
             logger.warning(
-                "Could not display whisper popup "
-                "for user %s",
+                "Could not display whisper popup for user %s",
                 user_id,
+            )
+            return
+
+        # آماده‌کردن دکمه برای بخش بعدی نجوا
+        callback_message = (
+            callback_query.get("message") or {}
+        )
+
+        callback_chat = (
+            callback_message.get("chat") or {}
+        )
+
+        callback_chat_id = callback_chat.get("id")
+        callback_message_id = callback_message.get(
+            "message_id"
+        )
+
+        if (
+            callback_chat_id is not None
+            and callback_message_id is not None
+        ):
+            if page + 1 < len(chunks):
+                next_keyboard = {
+                    "inline_keyboard": [
+                        [
+                            {
+                                "text": (
+                                    f"📩 ادامه نجوا "
+                                    f"({page + 2}/{len(chunks)})"
+                                ),
+                                "callback_data": (
+                                    f"whisper_open:"
+                                    f"{whisper_id}:"
+                                    f"{page + 1}"
+                                ),
+                            }
+                        ]
+                    ]
+                }
+            else:
+                # آخرین بخش نمایش داده شده؛ دکمه حذف می‌شود.
+                next_keyboard = {
+                    "inline_keyboard": []
+                }
+
+            edit_result = self.api(
+                "editMessageReplyMarkup",
+                {
+                    "chat_id": callback_chat_id,
+                    "message_id": callback_message_id,
+                    "reply_markup": next_keyboard,
+                },
             )
 
-            self.send_message(
-                user_id,
-                "💌 متن نجوا:\n\n" + alert_text,
-            )
+            if (
+                not edit_result
+                or not edit_result.get("ok")
+            ):
+                logger.warning(
+                    "Could not update whisper pagination "
+                    "button for whisper %s",
+                    whisper_id,
+                )
 
     # ==========================================
     #         Administrator Checking
@@ -768,7 +832,7 @@ class NevoBot:
                     user_id,
                 )
 
-            # نجوا باید قبل از ضداسپم بررسی شود.
+            # نجوا قبل از ضداسپم بررسی می‌شود.
             if self.handle_whisper_message(
                 message
             ):
