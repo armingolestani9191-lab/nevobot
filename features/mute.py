@@ -1,122 +1,27 @@
 import logging
 import re
 import time
-import unicodedata
 
 logger = logging.getLogger("NevoBot.Mute")
 
 
-def normalize_text(value):
-    """یکسان‌سازی اعداد، فاصله‌ها و حروف فارسی و عربی."""
-    value = unicodedata.normalize("NFKC", str(value or ""))
-
-    value = value.translate(
-        str.maketrans(
-            "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
-            "01234567890123456789",
-        )
-    )
-
-    value = value.replace("ي", "ی").replace("ك", "ک")
-    value = value.replace("\u200c", " ")
-    value = value.replace("\u200f", "")
-    value = value.replace("\u200e", "")
-
-    return " ".join(value.lower().split()).strip()
-
-
-MUTE_ALIASES = {
-    "سکوت",
-    "ساکت",
-    "سکوت کن",
-    "ساکت کن",
-    "mute",
-}
-
-UNMUTE_ALIASES = {
-    "حذف سکوت",
-    "سکوت حذف",
-    "رفع سکوت",
-    "لغو سکوت",
-    "برداشتن سکوت",
-    "سکوت بردار",
-    "ساکت نباش",
-    "از سکوت دربیار",
-    "آنسکوت",
-    "unmute",
-    "un mute",
-}
-
-
-def parse_mute_command(text):
-    """
-    خروجی:
-        ("mute", None)       سکوت دائمی
-        ("mute", 10)         سکوت ۱۰ دقیقه‌ای
-        ("unmute", None)     رفع سکوت
-        (None, None)         دستور نامرتبط
-    """
-    value = normalize_text(text)
-
-    if value in {normalize_text(x) for x in UNMUTE_ALIASES}:
-        return "unmute", None
-
-    if value in {normalize_text(x) for x in MUTE_ALIASES}:
-        return "mute", None
-
-    minute_word = (
-        r"(?:دقیقه|دیقه|دییقه|دقيقه|min|mins|minute|minutes)"
-    )
-
-    command_pattern = (
-        rf"(?:سکوت|ساکت|سکوت کن|ساکت کن|mute)"
-        rf"\s+(\d+)\s*{minute_word}"
-    )
-
-    match = re.fullmatch(command_pattern, value)
-
-    if match:
-        return "mute", int(match.group(1))
-
-    return None, None
-
-
 class MuteFeature:
-    """مدیریت سکوت و رفع سکوت با API بله."""
-
     def __init__(self, api, is_authorized):
         self.api = api
         self.is_authorized = is_authorized
 
-    @staticmethod
-    def _target_id(message):
-        """استخراج شناسه کاربری که پیامش ریپلای شده است."""
-        reply = message.get("reply_to_message") or {}
-        user = reply.get("from") or {}
-        return user.get("id")
-
-    def _restrict(self, chat_id, user_id, can_send, until_date=None):
-        """
-        اعمال یا برداشتن محدودیت ارسال.
-
-        can_send=False:
-            مسدود کردن ارسال پیام و رسانه.
-
-        can_send=True:
-            فعال کردن مجدد مجوزهای ارسال.
-        """
-
-        permissions = {
-            "can_send_messages": can_send,
-            "can_send_media_messages": can_send,
-            "can_send_other_messages": can_send,
-            "can_add_web_page_previews": can_send,
-        }
+    def _api_restrict(self, chat_id, user_id, muted, until_date=None):
+        allowed = not muted
 
         payload = {
             "chat_id": chat_id,
             "user_id": user_id,
-            "permissions": permissions,
+            "permissions": {
+                "can_send_messages": allowed,
+                "can_send_media_messages": allowed,
+                "can_send_other_messages": allowed,
+                "can_add_web_page_previews": allowed,
+            },
             "use_independent_chat_permissions": True,
         }
 
@@ -126,222 +31,227 @@ class MuteFeature:
         try:
             result = self.api("restrictChatMember", payload)
 
-        except Exception:
-            logger.exception("Mute API request failed")
-            return False, "خطا هنگام اجرای درخواست محدودیت."
+            if not isinstance(result, dict):
+                return False, "پاسخ نامعتبر از API دریافت شد."
 
-        if not isinstance(result, dict) or result.get("ok") is not True:
-            if isinstance(result, dict):
+            if result.get("ok") is not True:
                 error = result.get(
                     "description",
-                    "خطای نامشخص API",
+                    "دلیل خطا مشخص نیست."
                 )
-            else:
-                error = "پاسخ معتبر از API دریافت نشد."
+                return False, error
 
-            logger.error(
-                "restrictChatMember failed: %s | chat=%s | user=%s",
-                error,
-                chat_id,
-                user_id,
-            )
+            return True, None
 
-            return False, error
+        except Exception as exc:
+            logger.exception("Mute API request failed")
+            return False, str(exc)
 
-        if result.get("result") is False:
-            return False, "API محدودیت را تأیید نکرد."
+    def _get_target(self, message):
+        reply = message.get("reply_to_message")
 
-        logger.info(
-            "Permissions updated | chat=%s | user=%s | can_send=%s",
-            chat_id,
-            user_id,
-            can_send,
+        if not isinstance(reply, dict):
+            return None
+
+        user = reply.get("from")
+
+        if not isinstance(user, dict):
+            return None
+
+        user_id = user.get("id")
+
+        if user_id is None:
+            return None
+
+        return user_id
+
+    def _parse_duration(self, text):
+        text = text.strip()
+
+        match = re.search(
+            r"(\d+)\s*(ثانیه|ثانیه‌ای|دقیقه|دقیقه‌ای|"
+            r"ساعت|ساعتی|second|seconds|minute|minutes|"
+            r"hour|hours)",
+            text,
+            re.IGNORECASE,
         )
 
-        return True, None
+        if not match:
+            return None
 
-    def handle_message(self, message):
-        """پردازش دستور سکوت و رفع سکوت."""
+        amount = int(match.group(1))
+        unit = match.group(2).lower()
 
+        if unit.startswith("ثانیه") or unit.startswith("second"):
+            seconds = amount
+        elif unit.startswith("دقیقه") or unit.startswith("minute"):
+            seconds = amount * 60
+        else:
+            seconds = amount * 3600
+
+        # حداکثر زمان سکوت: یک ساعت
+        if seconds <= 0 or seconds > 3600:
+            return None
+
+        return seconds
+
+    def _is_mute_command(self, text):
+        normalized = " ".join(text.strip().lower().split())
+
+        mute_commands = (
+            "سکوت",
+            "ساکت",
+            "سکوت کن",
+            "ساکت کن",
+            "mute",
+        )
+
+        unmute_commands = (
+            "حذف سکوت",
+            "سکوت حذف",
+            "رفع سکوت",
+            "لغو سکوت",
+            "آزاد",
+            "unmute",
+        )
+
+        if normalized in unmute_commands:
+            return "unmute", None
+
+        if normalized in mute_commands:
+            return "mute", None
+
+        for command in ("سکوت", "ساکت", "mute"):
+            if normalized.startswith(command + " "):
+                duration = self._parse_duration(
+                    normalized[len(command):]
+                )
+                return "mute", duration
+
+        return None, None
+
+    def handle(self, message):
         if not isinstance(message, dict):
-            return None
-
-        chat = message.get("chat") or {}
-
-        # سکوت فقط در گروه و سوپرگروه اجرا می‌شود.
-        if chat.get("type") not in {"group", "supergroup"}:
-            return None
+            return {"handled": False}
 
         text = message.get("text", "")
 
-        if not isinstance(text, str):
-            return None
+        if not isinstance(text, str) or not text.strip():
+            return {"handled": False}
 
-        action, duration_minutes = parse_mute_command(text)
+        action, duration = self._is_mute_command(text)
 
         if action is None:
-            return None
+            return {"handled": False}
 
+        chat = message.get("chat") or {}
         chat_id = chat.get("id")
+        chat_type = chat.get("type")
+
+        if chat_type not in ("group", "supergroup"):
+            return {
+                "handled": True,
+                "text": "❌ این دستور فقط داخل گروه قابل استفاده است.",
+            }
+
+        if chat_id is None:
+            return {
+                "handled": True,
+                "text": "❌ اطلاعات گروه دریافت نشد.",
+            }
+
+        target_id = self._get_target(message)
+
+        if target_id is None:
+            return {
+                "handled": True,
+                "text": (
+                    "⚠️ برای استفاده از این دستور، "
+                    "روی پیام فرد موردنظر ریپلای کن."
+                ),
+            }
 
         sender = message.get("from") or {}
         sender_id = sender.get("id")
 
-        target_id = self._target_id(message)
-
-        if chat_id is None:
+        if sender_id is None:
             return {
-                "ok": False,
-                "text": "❌ شناسه گروه پیدا نشد.",
+                "handled": True,
+                "text": "❌ اطلاعات اجراکننده دستور دریافت نشد.",
             }
 
-        # دستور باید روی پیام کاربر ریپلای شود.
-        if target_id is None:
-            return {
-                "ok": False,
-                "text": (
-                    "👀 داداش، اول روی پیام کاربر موردنظر "
-                    "ریپلای کن و بعد دستور سکوت رو بفرست."
-                ),
-            }
-
-        # جلوگیری از اجرای دستور روی خود فرد.
-        if (
-            sender_id is not None
-            and str(target_id) == str(sender_id)
-        ):
-            return {
-                "ok": False,
-                "text": "❌ نمی‌تونی دستور سکوت رو روی خودت اجرا کنی.",
-            }
-
-        # فقط ادمین واقعی یا ناظر همان گروه.
         try:
-            authorized = self.is_authorized(message)
-
+            authorized = self.is_authorized(chat_id, sender_id)
         except Exception:
-            logger.exception("Mute authorization check failed")
-
+            logger.exception("Authorization check failed")
             return {
-                "ok": False,
-                "text": "❌ بررسی مجوز ناموفق بود؛ دستور اجرا نشد.",
+                "handled": True,
+                "text": "❌ بررسی دسترسی انجام نشد.",
             }
 
         if not authorized:
             return {
-                "ok": False,
-                "text": (
-                    "⛔ فقط ادمین گروه یا ناظر ثبت‌شده همین گروه "
-                    "می‌تونه سکوت رو مدیریت کنه."
-                ),
+                "handled": True,
+                "text": "⛔ اجازه اجرای این دستور را نداری.",
             }
 
-        # =========================
-        # سکوت
-        # =========================
         if action == "mute":
+            until_date = None
 
-            # سکوت زمان‌دار: ۱ تا ۶۰ دقیقه.
-            if duration_minutes is not None:
+            if duration is not None:
+                until_date = int(time.time()) + duration
 
-                if duration_minutes < 1:
-                    return {
-                        "ok": False,
-                        "text": "⚠️ مدت سکوت باید حداقل ۱ دقیقه باشه.",
-                    }
-
-                if duration_minutes > 60:
-                    return {
-                        "ok": False,
-                        "text": (
-                            "⚠️ حداکثر مدت سکوت ۶۰ دقیقه‌ست.\n"
-                            "برای سکوت بدون محدودیت زمانی، "
-                            "فقط دستور «سکوت» رو بفرست."
-                        ),
-                    }
-
-                until_date = (
-                    int(time.time()) + duration_minutes * 60
-                )
-
-                success, error = self._restrict(
-                    chat_id=chat_id,
-                    user_id=target_id,
-                    can_send=False,
-                    until_date=until_date,
-                )
-
-                if not success:
-                    return {
-                        "ok": False,
-                        "text": (
-                            "❌ سکوت انجام نشد!\n\n"
-                            "بررسی کن ربات ادمین گروه باشه و "
-                            "مجوز محدودکردن اعضا رو داشته باشه.\n\n"
-                            f"خطای API: {error}"
-                        ),
-                    }
-
-                return {
-                    "ok": True,
-                    "text": (
-                        f"🔇 کاربر به مدت {duration_minutes} دقیقه "
-                        "ساکت شد.\n"
-                        "بعد از پایان زمان، محدودیت زمانی "
-                        "خودکار منقضی می‌شه."
-                    ),
-                }
-
-            # سکوت دائمی تا زمان اجرای دستور رفع سکوت.
-            success, error = self._restrict(
+            success, error = self._api_restrict(
                 chat_id=chat_id,
                 user_id=target_id,
-                can_send=False,
+                muted=True,
+                until_date=until_date,
             )
 
             if not success:
+                logger.error("Mute failed: %s", error)
                 return {
-                    "ok": False,
+                    "handled": True,
                     "text": (
-                        "❌ سکوت انجام نشد!\n\n"
-                        "بررسی کن ربات ادمین گروه باشه و "
-                        "مجوز محدودکردن اعضا رو داشته باشه.\n\n"
-                        f"خطای API: {error}"
+                        "❌ سکوت اعمال نشد.\n"
+                        f"دلیل API: {error}"
+                    ),
+                }
+
+            if duration is not None:
+                return {
+                    "handled": True,
+                    "text": (
+                        "🔇 درخواست سکوت با موفقیت ثبت شد.\n"
+                        f"مدت: {duration // 60 or 1} دقیقه"
                     ),
                 }
 
             return {
-                "ok": True,
-                "text": (
-                    "🔇 کاربر ساکت شد!\n"
-                    "برای فعال کردن دوباره امکان ارسال پیام، "
-                    "روی پیامش ریپلای کن و «حذف سکوت» رو بفرست."
-                ),
+                "handled": True,
+                "text": "🔇 درخواست سکوت با موفقیت ثبت شد.",
             }
 
-        # =========================
-        # رفع سکوت
-        # =========================
-        success, error = self._restrict(
-            chat_id=chat_id,
-            user_id=target_id,
-            can_send=True,
-        )
+        if action == "unmute":
+            success, error = self._api_restrict(
+                chat_id=chat_id,
+                user_id=target_id,
+                muted=False,
+            )
 
-        if not success:
-            return {
-                "ok": False,
-                "text": (
-                    "❌ رفع سکوت انجام نشد!\n\n"
-                    "مجوزهای ربات رو بررسی کن.\n"
-                    f"خطای API: {error}"
-                ),
-            }
-
-        return {
-            "ok": True,
-            "text": (
-                "🔊 سکوت کاربر برداشته شد!\n"
-                "مجوزهای ارسال پیام و رسانه دوباره فعال شدند."
-            ),
+            if not success:
+                logger.error("Unmute failed: %s", error)
+                return {
+                    "handled": True,
+                    "text": (
+                        "❌ رفع سکوت انجام نشد.\n"
+                        f"دلیل API: {error}"
+                    ),
                 }
+
+            return {
+                "handled": True,
+                "text": "🔊 درخواست رفع سکوت با موفقیت ثبت شد.",
+            }
+
+        return {"handled": False}
