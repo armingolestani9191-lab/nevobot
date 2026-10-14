@@ -1,9 +1,11 @@
 # ==========================================
-#       NevoBot | Fast & Stable GIF Maker
+#       NevoBot | Fast GIF Maker
 # ==========================================
 
 import os
 import re
+import json
+import time
 import shutil
 import logging
 import tempfile
@@ -19,20 +21,52 @@ logger = logging.getLogger("NevoBot.GifMaker")
 
 
 class GifMakerFeature:
-    """تبدیل عکس، ویدئو و GIF ریپلای‌شده به GIF."""
+    """
+    تبدیل عکس، ویدئو و GIF ریپلای‌شده به GIF.
+
+    دستورات:
+        گیف
+        گیف تست
+        گیف متن دلخواه
+
+    ویژگی‌ها:
+        - نرخ فریم ویدئو: 20 FPS
+        - حفظ ابعاد اصلی
+        - تبدیل سبک‌تر بدون palettegen
+        - محدودیت حجم و مدت
+        - پردازش در ترد جدا
+        - پاک‌سازی فایل‌های موقت
+    """
 
     MAX_DOWNLOAD_SIZE = 20 * 1024 * 1024
     MAX_DURATION = 15
+    MAX_DIMENSION = 4096
+    MAX_PIXELS = 12_000_000
+
+    OUTPUT_FPS = 20
+    REQUEST_TIMEOUT = 40
+    FFMPEG_TIMEOUT = 180
+
     MAX_CONCURRENT_JOBS = 1
 
-    # نرخ فریم ویدئو و GIF کاهش داده نمی‌شود.
-    OUTPUT_FPS = 20
-
     ALLOWED_EXTENSIONS = {
-        ".jpg", ".jpeg", ".png", ".webp", ".bmp",
-        ".gif", ".mp4", ".m4v", ".mov", ".webm",
-        ".mkv", ".avi", ".3gp", ".mpeg", ".mpg",
-        ".ts", ".mjpeg",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".bmp",
+        ".gif",
+        ".mp4",
+        ".m4v",
+        ".mov",
+        ".webm",
+        ".mkv",
+        ".avi",
+        ".3gp",
+        ".mpeg",
+        ".mpg",
+        ".ts",
+        ".mjpeg",
     }
 
     def __init__(
@@ -47,16 +81,27 @@ class GifMakerFeature:
         self.request_timeout = request_timeout
         self.send_message = send_message
 
-        self.api_url = f"{self.api_base_url}/bot{self.token}"
-        self.file_url = f"{self.api_base_url}/file/bot{self.token}"
+        self.api_url = (
+            f"{self.api_base_url}/bot{self.token}"
+        )
+
+        self.file_url = (
+            f"{self.api_base_url}/file/bot{self.token}"
+        )
 
         self.session = requests.Session()
+
         self.session.headers.update({
-            "User-Agent": "NevoBot-GifMaker/3.0",
+            "User-Agent": "NevoBot-GifMaker/4.0",
         })
 
         self._semaphore = threading.BoundedSemaphore(
             self.MAX_CONCURRENT_JOBS
+        )
+
+        logger.info(
+            "GIF maker initialized | fps=%s",
+            self.OUTPUT_FPS,
         )
 
     # ======================================
@@ -65,40 +110,50 @@ class GifMakerFeature:
 
     @staticmethod
     def normalize_text(text):
-        """یکسان‌سازی متن فارسی."""
-
         if not isinstance(text, str):
             return ""
 
         text = text.replace("ي", "ی")
         text = text.replace("ك", "ک")
-        text = text.replace("\u200c", " ")
 
-        return re.sub(r"\s+", " ", text).strip()
+        return re.sub(
+            r"\s+",
+            " ",
+            text,
+        ).strip()
 
     def _parse_command(self, message):
-        """
-        پشتیبانی از:
-        گیف
-        گیف تست
-        گیف هر متن دلخواه
-        """
-
         if not isinstance(message, dict):
             return False
 
-        text = self.normalize_text(message.get("text") or "")
+        text = self.normalize_text(
+            message.get("text") or ""
+        )
 
         return bool(
-            re.fullmatch(r"گیف(?:\s+.+)?", text)
+            re.fullmatch(
+                r"گیف(?:\s+.+)?",
+                text,
+            )
         )
 
     def _get_overlay_text(self, message):
-        """استخراج متن بعد از دستور گیف."""
+        """
+        متن بعد از دستور گیف را استخراج می‌کند.
 
-        text = self.normalize_text(message.get("text") or "")
+        مثال:
+            گیف تست
+            خروجی متن: تست
+        """
 
-        match = re.fullmatch(r"گیف(?:\s+(.+))?", text)
+        text = self.normalize_text(
+            message.get("text") or ""
+        )
+
+        match = re.fullmatch(
+            r"گیف(?:\s+(.+))?",
+            text,
+        )
 
         if not match:
             return None
@@ -108,7 +163,6 @@ class GifMakerFeature:
         if not overlay:
             return None
 
-        # شکل‌دهی حروف فارسی برای نمایش صحیح.
         try:
             import arabic_reshaper
             from bidi.algorithm import get_display
@@ -119,30 +173,35 @@ class GifMakerFeature:
 
         except ImportError:
             logger.warning(
-                "Persian text shaping libraries are unavailable."
+                "Arabic text libraries are unavailable."
             )
 
         except Exception:
             logger.exception(
-                "Could not shape Persian overlay text."
+                "Could not shape overlay text."
             )
 
         return overlay
 
     @staticmethod
     def _escape_filter_path(path):
-        """آماده‌سازی مسیر برای فیلتر FFmpeg."""
+        """
+        Escape مسیر فایل برای استفاده در فیلتر FFmpeg.
+        """
 
         path = os.path.abspath(path)
 
-        for old, new in (
+        replacements = (
             ("\\", "\\\\"),
             (":", "\\:"),
             ("'", "\\'"),
             (",", "\\,"),
             ("[", "\\["),
             ("]", "\\]"),
-        ):
+            ("%", "\\%"),
+        )
+
+        for old, new in replacements:
             path = path.replace(old, new)
 
         return path
@@ -161,12 +220,17 @@ class GifMakerFeature:
 
     @staticmethod
     def _get_media(reply):
-        """تشخیص نوع رسانه ریپلای‌شده."""
+        """
+        تشخیص عکس، ویدئو، GIF و فایل ارسالی.
+        """
 
         if not isinstance(reply, dict):
             return None
 
-        # GIF یا انیمیشن
+        # ----------------------------------
+        #               GIF
+        # ----------------------------------
+
         animation = reply.get("animation")
 
         if GifMakerFeature._valid_file_id(animation):
@@ -175,7 +239,10 @@ class GifMakerFeature:
                 "kind": "gif",
             }
 
-        # ویدئو یا ویدئوی گرد
+        # ----------------------------------
+        #              Video
+        # ----------------------------------
+
         for field in ("video", "video_note"):
 
             video = reply.get(field)
@@ -186,20 +253,22 @@ class GifMakerFeature:
                     "kind": "video",
                 }
 
-        # عکس معمولی
+        # ----------------------------------
+        #              Photo
+        # ----------------------------------
+
         photos = reply.get("photo")
 
         if isinstance(photos, list) and photos:
 
             valid_photos = [
-                item
-                for item in photos
-                if GifMakerFeature._valid_file_id(item)
+                photo
+                for photo in photos
+                if GifMakerFeature._valid_file_id(photo)
             ]
 
             if valid_photos:
 
-                # انتخاب بزرگ‌ترین نسخه موجود.
                 photo = max(
                     valid_photos,
                     key=lambda item: (
@@ -213,55 +282,70 @@ class GifMakerFeature:
                     "kind": "photo",
                 }
 
-        # رسانه‌ای که به شکل فایل ارسال شده است.
+        # ----------------------------------
+        #             Document
+        # ----------------------------------
+
         document = reply.get("document")
 
-        if GifMakerFeature._valid_file_id(document):
+        if not GifMakerFeature._valid_file_id(document):
+            return None
 
-            mime = str(
-                document.get("mime_type") or ""
-            ).lower()
+        mime = str(
+            document.get("mime_type") or ""
+        ).lower()
 
-            filename = str(
-                document.get("file_name") or ""
-            ).lower()
+        filename = str(
+            document.get("file_name") or ""
+        ).lower()
 
-            if (
-                mime == "image/gif"
-                or filename.endswith(".gif")
-            ):
-                return {
-                    "file_id": document["file_id"],
-                    "kind": "gif",
-                }
+        if (
+            mime == "image/gif"
+            or filename.endswith(".gif")
+        ):
+            return {
+                "file_id": document["file_id"],
+                "kind": "gif",
+            }
 
-            video_extensions = (
-                ".mp4", ".m4v", ".mov", ".webm",
-                ".mkv", ".avi", ".3gp", ".mpeg",
-                ".mpg", ".ts",
-            )
+        video_extensions = (
+            ".mp4",
+            ".m4v",
+            ".mov",
+            ".webm",
+            ".mkv",
+            ".avi",
+            ".3gp",
+            ".mpeg",
+            ".mpg",
+            ".ts",
+        )
 
-            if (
-                mime.startswith("video/")
-                or filename.endswith(video_extensions)
-            ):
-                return {
-                    "file_id": document["file_id"],
-                    "kind": "video",
-                }
+        if (
+            mime.startswith("video/")
+            or filename.endswith(video_extensions)
+        ):
+            return {
+                "file_id": document["file_id"],
+                "kind": "video",
+            }
 
-            image_extensions = (
-                ".jpg", ".jpeg", ".png", ".webp", ".bmp",
-            )
+        image_extensions = (
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+            ".bmp",
+        )
 
-            if (
-                mime.startswith("image/")
-                or filename.endswith(image_extensions)
-            ):
-                return {
-                    "file_id": document["file_id"],
-                    "kind": "photo",
-                }
+        if (
+            mime.startswith("image/")
+            or filename.endswith(image_extensions)
+        ):
+            return {
+                "file_id": document["file_id"],
+                "kind": "photo",
+            }
 
         return None
 
@@ -270,11 +354,15 @@ class GifMakerFeature:
     # ======================================
 
     def _get_file_path(self, file_id):
-        """دریافت مسیر فایل از API بله."""
+        """
+        دریافت مسیر رسانه از API بله.
+        """
 
         response = self.session.post(
             f"{self.api_url}/getFile",
-            json={"file_id": file_id},
+            json={
+                "file_id": file_id,
+            },
             timeout=self.request_timeout,
         )
 
@@ -285,14 +373,18 @@ class GifMakerFeature:
 
         except ValueError as error:
             raise RuntimeError(
-                "پاسخ دریافت مسیر فایل معتبر نیست."
+                "پاسخ دریافت فایل از بله معتبر نیست."
             ) from error
 
         if not isinstance(data, dict) or not data.get("ok"):
+
             description = (
-                data.get("description", "دریافت فایل ناموفق بود.")
+                data.get(
+                    "description",
+                    "دریافت مسیر فایل ناموفق بود.",
+                )
                 if isinstance(data, dict)
-                else "پاسخ API معتبر نیست."
+                else "پاسخ API نامعتبر است."
             )
 
             raise RuntimeError(description)
@@ -313,25 +405,37 @@ class GifMakerFeature:
         destination,
         fallback_extension=".bin",
     ):
-        """دانلود رسانه با کنترل حجم و پاک‌سازی فایل ناقص."""
+        """
+        دانلود رسانه با محدودیت حجم و پاک‌سازی خطاها.
+        """
 
         file_path = self._get_file_path(file_id)
 
+        original_path = file_path.split("?")[0]
+
         extension = os.path.splitext(
-            file_path.split("?")[0]
+            original_path
         )[1].lower()
 
         if extension not in self.ALLOWED_EXTENSIONS:
             extension = fallback_extension
 
         destination = (
-            os.path.splitext(destination)[0] + extension
+            os.path.splitext(destination)[0]
+            + extension
         )
 
-        encoded_path = quote(file_path, safe="/")
-        url = f"{self.file_url}/{encoded_path}"
+        encoded_path = quote(
+            file_path.lstrip("/"),
+            safe="/",
+        )
+
+        url = (
+            f"{self.file_url}/{encoded_path}"
+        )
 
         downloaded = 0
+        started_at = time.monotonic()
 
         try:
             with self.session.get(
@@ -367,7 +471,6 @@ class GifMakerFeature:
                     for chunk in response.iter_content(
                         chunk_size=256 * 1024
                     ):
-
                         if not chunk:
                             continue
 
@@ -381,7 +484,6 @@ class GifMakerFeature:
                         output.write(chunk)
 
         except Exception:
-
             try:
                 if os.path.exists(destination):
                     os.remove(destination)
@@ -400,9 +502,9 @@ class GifMakerFeature:
             )
 
         logger.info(
-            "Media downloaded | extension=%s | size=%s",
-            extension,
-            os.path.getsize(destination),
+            "Download complete | bytes=%s | seconds=%.2f",
+            downloaded,
+            time.monotonic() - started_at,
         )
 
         return destination
@@ -413,7 +515,9 @@ class GifMakerFeature:
         animation_path,
         reply_to_message_id=None,
     ):
-        """ارسال GIF به بله."""
+        """
+        ارسال GIF ساخته‌شده به گروه.
+        """
 
         payload = {
             "chat_id": chat_id,
@@ -474,93 +578,141 @@ class GifMakerFeature:
 
         if not ffmpeg:
             raise RuntimeError(
-                "FFmpeg روی سرور نصب نیست."
+                "FFmpeg روی سرور پیدا نشد. "
+                "باید مطمئن شویم Railway از Dockerfile پروژه استفاده می‌کند."
             )
 
         return ffmpeg
 
     @staticmethod
-    def _run_ffmpeg(command):
-        """اجرای FFmpeg و ثبت جزئیات خطا."""
-
-        try:
-            result = subprocess.run(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                errors="replace",
-                timeout=180,
-                check=False,
-            )
-
-        except subprocess.TimeoutExpired as error:
-
-            logger.error("FFmpeg timed out.")
-
-            raise RuntimeError(
-                "پردازش رسانه بیش از حد طول کشید."
-            ) from error
-
-        except OSError as error:
-
-            logger.exception(
-                "Could not start FFmpeg."
-            )
-
-            raise RuntimeError(
-                "اجرای FFmpeg ناموفق بود."
-            ) from error
-
-        if result.returncode != 0:
-
-            details = (result.stderr or "").strip()
-
-            logger.error(
-                "FFmpeg failed | returncode=%s | command=%s | stderr=%s",
-                result.returncode,
-                " ".join(command),
-                details[-4000:],
-            )
-
-            if result.returncode == -9:
-                raise RuntimeError(
-                    "پردازش توسط سرور متوقف شد؛ احتمالاً حافظه کافی نیست."
-                )
-
-            raise RuntimeError(
-                "FFmpeg نتوانست رسانه را پردازش کند. "
-                "جزئیات خطا در لاگ سرور ثبت شده است."
-            )
+    def _find_ffprobe():
+        return shutil.which("ffprobe")
 
     @staticmethod
-    def _get_media_info(ffmpeg, input_path):
-        """استخراج مدت و ابعاد رسانه بدون تغییر فایل."""
-
-        command = [
-            ffmpeg,
-            "-hide_banner",
-            "-i",
-            input_path,
-        ]
+    def _run_process(command, timeout=30):
+        """
+        اجرای دستور خارجی با ثبت خروجی خطا.
+        """
 
         try:
-            result = subprocess.run(
+            return subprocess.run(
                 command,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 errors="replace",
-                timeout=20,
+                timeout=timeout,
                 check=False,
             )
 
         except subprocess.TimeoutExpired as error:
+            logger.error(
+                "External process timed out."
+            )
+
             raise RuntimeError(
-                "تشخیص اطلاعات رسانه بیش از حد طول کشید."
+                "پردازش رسانه بیش از حد طول کشید."
             ) from error
+
+        except OSError as error:
+            logger.exception(
+                "Could not start external process."
+            )
+
+            raise RuntimeError(
+                "اجرای برنامه پردازش رسانه ناموفق بود."
+            ) from error
+
+    @classmethod
+    def _get_media_info(cls, ffmpeg, input_path):
+        """
+        دریافت مدت، ابعاد و اطلاعات رسانه.
+
+        ابتدا از ffprobe استفاده می‌شود.
+        در صورت نبود آن، خروجی FFmpeg بررسی می‌شود.
+        """
+
+        ffprobe = cls._find_ffprobe()
+
+        if ffprobe:
+
+            result = cls._run_process(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height,duration:"
+                    "format=duration",
+                    "-of",
+                    "json",
+                    input_path,
+                ],
+                timeout=25,
+            )
+
+            if result.returncode == 0:
+
+                try:
+                    data = json.loads(result.stdout or "{}")
+
+                    streams = data.get("streams") or []
+                    format_data = data.get("format") or {}
+
+                    if streams:
+
+                        stream = streams[0]
+
+                        width = int(
+                            stream.get("width") or 0
+                        )
+
+                        height = int(
+                            stream.get("height") or 0
+                        )
+
+                        raw_duration = (
+                            stream.get("duration")
+                            or format_data.get("duration")
+                        )
+
+                        try:
+                            duration = float(raw_duration)
+
+                        except (TypeError, ValueError):
+                            duration = None
+
+                        return (
+                            duration,
+                            width,
+                            height,
+                        )
+
+                except (
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                ):
+                    logger.exception(
+                        "Could not parse ffprobe output."
+                    )
+
+        # ----------------------------------
+        #          FFmpeg fallback
+        # ----------------------------------
+
+        result = cls._run_process(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-i",
+                input_path,
+            ],
+            timeout=25,
+        )
 
         output = (
             (result.stderr or "")
@@ -589,50 +741,98 @@ class GifMakerFeature:
                 + seconds
             )
 
-        # تلاش اول: ابعاد جریان ویدئو.
-        stream_matches = re.findall(
-            r"Stream #\d+:\d+.*?:\s*"
-            r"(?:Video|mjpeg|png|webp|gif)[^,\n]*,"
-            r"[^\n]*?(\d{2,5})x(\d{2,5})",
+        dimensions = re.search(
+            r"Video:.*?(\d{2,5})x(\d{2,5})",
             output,
-            flags=re.IGNORECASE,
+            flags=re.IGNORECASE | re.DOTALL,
         )
 
-        if stream_matches:
+        if dimensions:
 
-            width = int(stream_matches[0][0])
-            height = int(stream_matches[0][1])
-
-        else:
-
-            # تلاش دوم برای فرمت‌هایی که خروجی متفاوت دارند.
-            for match in re.findall(
-                r"(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)",
-                output,
-            ):
-
-                candidate_width = int(match[0])
-                candidate_height = int(match[1])
-
-                if (
-                    candidate_width >= 16
-                    and candidate_height >= 16
-                ):
-                    width = candidate_width
-                    height = candidate_height
-                    break
-
-        if not width or not height:
-
-            logger.error(
-                "Could not detect dimensions | output=%r",
-                output[-2000:],
-            )
+            width = int(dimensions.group(1))
+            height = int(dimensions.group(2))
 
         return duration, width, height
 
     # ======================================
-    #               GIF Creation
+    #                Text Filter
+    # ======================================
+
+    def _build_text_filter(
+        self,
+        overlay_text,
+        output_path,
+        height,
+    ):
+        """
+        ایجاد فیلتر متن با استفاده از فایل موقت.
+
+        متن مستقیماً وارد دستور شل نمی‌شود.
+        """
+
+        if not overlay_text:
+            return None, None
+
+        text_path = output_path + ".txt"
+
+        with open(
+            text_path,
+            "w",
+            encoding="utf-8",
+        ) as text_file:
+
+            text_file.write(
+                overlay_text
+                .replace("\r", " ")
+                .replace("\n", " ")
+            )
+
+        font_candidates = (
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansArabicUI-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        )
+
+        font_path = next(
+            (
+                path
+                for path in font_candidates
+                if os.path.isfile(path)
+            ),
+            None,
+        )
+
+        text_file_path = self._escape_filter_path(
+            text_path
+        )
+
+        filter_parts = []
+
+        if font_path:
+            filter_parts.append(
+                "fontfile='"
+                + self._escape_filter_path(font_path)
+                + "'"
+            )
+
+        filter_parts.extend([
+            "textfile='" + text_file_path + "'",
+            "fontcolor=white",
+            f"fontsize=max(16\\,{height}/12)",
+            "x=(w-text_w)/2",
+            "y=(h-text_h)/2",
+            "borderw=3",
+            "bordercolor=black",
+            "expansion=none",
+        ])
+
+        return (
+            "drawtext=" + ":".join(filter_parts),
+            text_path,
+        )
+
+    # ======================================
+    #                GIF Creation
     # ======================================
 
     def _make_gif(
@@ -643,11 +843,17 @@ class GifMakerFeature:
         overlay_text=None,
     ):
         """
-        ساخت GIF با حفظ ابعاد پیکسلی.
+        ساخت GIF با مصرف حافظه کمتر.
 
-        ویدئو و GIF: نرخ فریم ۲۰.
-        عکس ثابت: یک فریم با زمان نمایش دو ثانیه.
-        متن: اختیاری و بدون تغییر ابعاد.
+        ویدئو و GIF:
+            20 FPS، بدون تغییر ابعاد.
+
+        عکس:
+            یک فریم با زمان نمایش حدود دو ثانیه.
+
+        برای سبک‌تر شدن پردازش، از palettegen که
+        همه فریم‌ها را برای پالت رنگ تحلیل می‌کند
+        استفاده نمی‌شود.
         """
 
         ffmpeg = self._find_ffmpeg()
@@ -662,111 +868,59 @@ class GifMakerFeature:
                 "ابعاد رسانه قابل تشخیص نیست."
             )
 
-        if width > 4096 or height > 4096:
+        if width < 1 or height < 1:
             raise ValueError(
-                "ابعاد رسانه بیش از حد بزرگ است."
-            )
-
-        if width * height > 12_000_000:
-            raise ValueError(
-                "رزولوشن رسانه برای پردازش روی سرور بیش از حد بزرگ است."
+                "ابعاد رسانه معتبر نیست."
             )
 
         if (
-            kind == "video"
+            width > self.MAX_DIMENSION
+            or height > self.MAX_DIMENSION
+        ):
+            raise ValueError(
+                "ابعاد رسانه خیلی بزرگ است؛ "
+                "یک تصویر یا ویدئوی کوچک‌تر بفرست."
+            )
+
+        if width * height > self.MAX_PIXELS:
+            raise ValueError(
+                "رزولوشن رسانه برای حافظه سرور بیش از حد بزرگ است."
+            )
+
+        if (
+            kind in ("video", "gif")
             and duration is not None
             and duration > self.MAX_DURATION
         ):
             raise ValueError(
-                "طول فیلم باید حداکثر ۱۵ ثانیه باشد."
+                "مدت ویدئو یا GIF باید حداکثر ۱۵ ثانیه باشد."
             )
-
-        fps = self.OUTPUT_FPS
-        text_path = None
 
         filters = []
 
-        # فقط ویدئو و GIF به فیلتر FPS نیاز دارند.
+        # ----------------------------------
+        #           Frame Rate
+        # ----------------------------------
+
         if kind != "photo":
-            filters.append(f"fps={fps}")
-
-        # نوشتن متن اختیاری؛ بدون ساخت تصویر overlay بزرگ.
-        if overlay_text:
-
-            text_path = output_path + ".txt"
-
-            with open(
-                text_path,
-                "w",
-                encoding="utf-8",
-            ) as text_file:
-
-                text_file.write(
-                    overlay_text.replace("\r", " ").replace("\n", " ")
-                )
-
-            font_candidates = (
-                "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSansArabicUI-Regular.ttf",
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            filters.append(
+                f"fps={self.OUTPUT_FPS}"
             )
 
-            font_path = next(
-                (
-                    path
-                    for path in font_candidates
-                    if os.path.isfile(path)
-                ),
-                None,
+        # ----------------------------------
+        #           Overlay Text
+        # ----------------------------------
+
+        text_filter, text_path = (
+            self._build_text_filter(
+                overlay_text,
+                output_path,
+                height,
             )
-
-            text_file_path = self._escape_filter_path(
-                text_path
-            )
-
-            drawtext = (
-                f"drawtext=textfile='{text_file_path}':"
-                "fontcolor=white:"
-                "fontsize=h/12:"
-                "x=(w-text_w)/2:"
-                "y=(h-text_h)/2:"
-                "borderw=3:"
-                "bordercolor=black:"
-                "expansion=none"
-            )
-
-            if font_path:
-
-                drawtext = (
-                    "drawtext="
-                    f"fontfile='{self._escape_filter_path(font_path)}':"
-                    f"textfile='{text_file_path}':"
-                    "fontcolor=white:"
-                    "fontsize=h/12:"
-                    "x=(w-text_w)/2:"
-                    "y=(h-text_h)/2:"
-                    "borderw=3:"
-                    "bordercolor=black:"
-                    "expansion=none"
-                )
-
-            filters.append(drawtext)
-
-        prefix = ",".join(filters)
-
-        if prefix:
-            prefix += ","
-
-        # هیچ scale یا resize در این فیلتر وجود ندارد.
-        filter_graph = (
-            f"[0:v]{prefix}split[a][b];"
-            "[a]palettegen=stats_mode=diff:"
-            "reserve_transparent=0[p];"
-            "[b][p]paletteuse="
-            "dither=bayer:"
-            "bayer_scale=3:"
-            "diff_mode=rectangle"
         )
+
+        if text_filter:
+            filters.append(text_filter)
 
         command = [
             ffmpeg,
@@ -774,26 +928,35 @@ class GifMakerFeature:
             "-hide_banner",
             "-loglevel",
             "error",
+            "-nostdin",
             "-threads",
             "1",
             "-filter_threads",
             "1",
-            "-filter_complex_threads",
-            "1",
             "-i",
             input_path,
-            "-filter_complex",
-            filter_graph,
         ]
 
-        if kind == "photo":
+        if filters:
+            command.extend([
+                "-vf",
+                ",".join(filters),
+            ])
 
-            # عکس ثابت به ۴۰ فریم یکسان تبدیل نمی‌شود.
+        # حداکثر زمان خروجی، حتی اگر اطلاعات مدت
+        # رسانه قابل تشخیص نبوده باشد.
+        if kind == "photo":
             command.extend([
                 "-frames:v",
                 "1",
                 "-final_delay",
                 "200",
+            ])
+
+        else:
+            command.extend([
+                "-t",
+                str(self.MAX_DURATION),
             ])
 
         command.extend([
@@ -808,57 +971,82 @@ class GifMakerFeature:
         ])
 
         logger.info(
-            "Starting GIF conversion | kind=%s | "
-            "dimensions=%sx%s | fps=%s | overlay=%s",
+            "GIF conversion started | "
+            "kind=%s | dimensions=%sx%s | fps=%s | text=%s",
             kind,
             width,
             height,
-            fps if kind != "photo" else "still-image",
+            self.OUTPUT_FPS if kind != "photo" else "still",
             bool(overlay_text),
         )
 
-        try:
+        started_at = time.monotonic()
 
-            self._run_ffmpeg(command)
+        try:
+            result = self._run_process(
+                command,
+                timeout=self.FFMPEG_TIMEOUT,
+            )
+
+            if result.returncode != 0:
+
+                details = (
+                    result.stderr or ""
+                ).strip()
+
+                logger.error(
+                    "FFmpeg failed | returncode=%s | stderr=%s",
+                    result.returncode,
+                    details[-4000:],
+                )
+
+                if result.returncode == -9:
+                    raise RuntimeError(
+                        "سرور پردازش را به دلیل کمبود منابع متوقف کرد."
+                    )
+
+                raise RuntimeError(
+                    "FFmpeg نتوانست رسانه را به GIF تبدیل کند."
+                )
 
             if (
                 not os.path.isfile(output_path)
                 or os.path.getsize(output_path) == 0
             ):
                 raise RuntimeError(
-                    "فایل خروجی GIF ساخته نشد."
+                    "فایل GIF ساخته نشده یا خالی است."
                 )
 
-            # کنترل ابعاد واقعی خروجی برای عکس‌ها.
-            if kind == "photo":
+            # ----------------------------------
+            #          Validate Output
+            # ----------------------------------
 
-                try:
-                    from PIL import Image
+            from PIL import Image
 
-                    with Image.open(output_path) as output_image:
-                        output_size = output_image.size
+            with Image.open(output_path) as output_image:
 
-                    if output_size != (width, height):
-                        raise RuntimeError(
-                            "ابعاد خروجی تغییر کرده است: "
-                            f"ورودی {width}x{height}، "
-                            f"خروجی {output_size[0]}x{output_size[1]}."
-                        )
+                output_width, output_height = (
+                    output_image.size
+                )
 
-                except ImportError:
-                    logger.warning(
-                        "Pillow unavailable; dimension check skipped."
-                    )
+            if (
+                output_width != width
+                or output_height != height
+            ):
+                raise RuntimeError(
+                    "ابعاد خروجی با ابعاد ورودی برابر نیست."
+                )
 
             logger.info(
-                "GIF ready | size=%s | dimensions=%sx%s",
+                "GIF conversion finished | "
+                "size=%s | dimensions=%sx%s | seconds=%.2f",
                 os.path.getsize(output_path),
-                width,
-                height,
+                output_width,
+                output_height,
+                time.monotonic() - started_at,
             )
 
         finally:
-
             if text_path and os.path.exists(text_path):
 
                 try:
@@ -866,11 +1054,11 @@ class GifMakerFeature:
 
                 except OSError:
                     logger.warning(
-                        "Could not remove temporary text file."
+                        "Could not remove text temporary file."
                     )
 
     # ======================================
-    #          Status Message Helpers
+    #             Status Helpers
     # ======================================
 
     def _delete_status_message(
@@ -882,7 +1070,6 @@ class GifMakerFeature:
             return
 
         try:
-
             response = self.session.post(
                 f"{self.api_url}/deleteMessage",
                 json={
@@ -898,7 +1085,7 @@ class GifMakerFeature:
 
             if not data.get("ok"):
                 logger.warning(
-                    "Could not delete status message: %s",
+                    "Could not delete status message | %s",
                     data.get("description"),
                 )
 
@@ -908,7 +1095,7 @@ class GifMakerFeature:
             )
 
     # ======================================
-    #               Error Handling
+    #              Error Helpers
     # ======================================
 
     def _notify_error(
@@ -920,26 +1107,43 @@ class GifMakerFeature:
             return
 
         if isinstance(error, ValueError):
-
             text = f"⚠️ {error}"
 
         elif isinstance(error, requests.RequestException):
-
             text = (
                 "❌ ارتباط با سرور بله ناموفق بود.\n"
-                "لطفاً چند لحظه دیگر امتحان کن."
+                "چند لحظه دیگر دوباره امتحان کن."
             )
 
-        else:
+        elif isinstance(error, RuntimeError):
 
+            error_text = str(error)
+
+            if "FFmpeg روی سرور پیدا نشد" in error_text:
+                text = (
+                    "❌ FFmpeg روی سرور نصب نیست.\n"
+                    "تنظیمات Deploy و Dockerfile را بررسی کنید."
+                )
+
+            elif "کمبود منابع" in error_text:
+                text = (
+                    "❌ سرور حافظه کافی برای پردازش این رسانه ندارد.\n"
+                    "یک فایل کوچک‌تر امتحان کن."
+                )
+
+            else:
+                text = (
+                    "❌ ساخت GIF ناموفق بود.\n"
+                    "جزئیات خطا در لاگ Railway ثبت شده است."
+                )
+
+        else:
             text = (
-                "❌ ساخت گیف ناموفق بود.\n"
-                "لطفاً دوباره امتحان کن؛ "
-                "اگر تکرار شد، لاگ سرور را بررسی می‌کنیم."
+                "❌ ساخت GIF ناموفق بود.\n"
+                "جزئیات خطا در لاگ Railway ثبت شده است."
             )
 
         try:
-
             self.send_message(
                 chat_id,
                 text,
@@ -947,15 +1151,17 @@ class GifMakerFeature:
 
         except Exception:
             logger.exception(
-                "Could not send GIF error message."
+                "Could not notify user about GIF error."
             )
 
     # ======================================
-    #               Job Handler
+    #                Job Handler
     # ======================================
 
     def handle_message(self, message):
-        """تشخیص دستور و شروع پردازش در ترد جدا."""
+        """
+        بررسی دستور و شروع کار در ترد جدا.
+        """
 
         if not isinstance(message, dict):
             return False
@@ -970,7 +1176,7 @@ class GifMakerFeature:
 
         media = self._get_media(reply)
 
-        if not media or not media.get("file_id"):
+        if not media:
             return False
 
         chat = message.get("chat") or {}
@@ -984,8 +1190,8 @@ class GifMakerFeature:
             self._notify_error(
                 chat_id,
                 ValueError(
-                    "یک گیف در حال پردازش است؛ "
-                    "چند لحظه دیگر دوباره امتحان کن."
+                    "یک GIF در حال ساخته‌شدن است؛ "
+                    "کمی صبر کن و دوباره امتحان کن."
                 ),
             )
 
@@ -999,13 +1205,13 @@ class GifMakerFeature:
             target=self._process_job,
             args=(message, media),
             daemon=True,
+            name="NevoBot-GIF",
         )
 
         try:
             worker.start()
 
         except Exception:
-
             self._semaphore.release()
 
             logger.exception(
@@ -1015,7 +1221,7 @@ class GifMakerFeature:
             self._notify_error(
                 chat_id,
                 RuntimeError(
-                    "شروع پردازش گیف ناموفق بود."
+                    "شروع پردازش GIF ناموفق بود."
                 ),
             )
 
@@ -1026,34 +1232,49 @@ class GifMakerFeature:
         message,
         media,
     ):
-        """دانلود، تبدیل و ارسال GIF."""
+        """
+        دانلود، تبدیل و ارسال فایل.
+        """
 
         chat_id = (
             (message.get("chat") or {}).get("id")
         )
 
         message_id = message.get("message_id")
+
         status_message_id = None
 
         try:
+            # ----------------------------------
+            #          Status Message
+            # ----------------------------------
 
-            # پیام وضعیت
             if self.send_message:
 
-                status_result = self.send_message(
-                    chat_id,
-                    "🎞️ در حال ساخت گیف...\n"
-                    "لطفاً چند لحظه صبر کن.",
-                )
-
-                if (
-                    isinstance(status_result, dict)
-                    and status_result.get("ok")
-                ):
-                    status_message_id = (
-                        (status_result.get("result") or {})
-                        .get("message_id")
+                try:
+                    status_result = self.send_message(
+                        chat_id,
+                        "🎞️ در حال ساخت گیف...\n"
+                        "لطفاً کمی صبر کن.",
                     )
+
+                    if (
+                        isinstance(status_result, dict)
+                        and status_result.get("ok")
+                    ):
+                        status_message_id = (
+                            (status_result.get("result") or {})
+                            .get("message_id")
+                        )
+
+                except Exception:
+                    logger.exception(
+                        "Could not send GIF status message."
+                    )
+
+            # ----------------------------------
+            #          Temporary Files
+            # ----------------------------------
 
             with tempfile.TemporaryDirectory(
                 prefix="nevobot_gif_"
@@ -1069,19 +1290,21 @@ class GifMakerFeature:
                     "output.gif",
                 )
 
-                fallback_extension = {
+                fallback_extensions = {
                     "photo": ".jpg",
                     "video": ".mp4",
                     "gif": ".gif",
-                }.get(
-                    media.get("kind"),
-                    ".bin",
-                )
+                }
 
                 input_path = self._download_file(
                     media["file_id"],
                     input_base,
-                    fallback_extension=fallback_extension,
+                    fallback_extension=(
+                        fallback_extensions.get(
+                            media.get("kind"),
+                            ".bin",
+                        )
+                    ),
                 )
 
                 self._make_gif(
@@ -1098,17 +1321,14 @@ class GifMakerFeature:
                 )
 
                 logger.info(
-                    "GIF created successfully | chat=%s | "
-                    "kind=%s | size=%s",
+                    "GIF sent successfully | chat=%s",
                     chat_id,
-                    media.get("kind"),
-                    os.path.getsize(output_path),
                 )
 
         except Exception as error:
 
             logger.exception(
-                "GIF creation failed | chat=%s | kind=%s",
+                "GIF job failed | chat=%s | kind=%s",
                 chat_id,
                 media.get("kind"),
             )
@@ -1120,15 +1340,10 @@ class GifMakerFeature:
 
         finally:
 
-            self._delete_status_message(
-                chat_id,
-                status_message_id,
-            )
-
-            try:
-                self._semaphore.release()
-
-            except ValueError:
-                logger.exception(
-                    "GIF semaphore release failed."
+            if status_message_id is not None:
+                self._delete_status_message(
+                    chat_id,
+                    status_message_id,
                 )
+
+            self._semaphore.release()
