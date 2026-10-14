@@ -1,1 +1,4 @@
 requests>=2.31.0,<3.0.0
+Pillow
+arabic-reshaper
+python-bidi
