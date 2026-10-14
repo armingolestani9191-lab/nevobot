@@ -29,52 +29,30 @@ class GifMakerFeature:
         گیف
         گیف تست
         گیف متن دلخواه
-
-    امکانات:
-        - حفظ ابعاد اصلی
-        - متن بزرگ و بولد در پایین و وسط تصویر
-        - حاشیه مشکی دور متن
-        - پالت رنگ اختصاصی برای GIF
-        - مدیریت خطاهای FFmpeg
-        - محدودیت حجم و مدت
-        - پاک‌سازی فایل‌های موقت
-        - جلوگیری از پردازش هم‌زمان چند فایل
     """
 
     MAX_DOWNLOAD_SIZE = 20 * 1024 * 1024
-
     MAX_DURATION = 15
 
     MAX_DIMENSION = 4096
-
     MAX_PIXELS = 12_000_000
 
-    OUTPUT_FPS = 20
+    # تنظیمات سبک‌تر برای پردازش GIF
+    OUTPUT_FPS = 12
+
+    # تنظیمات اختصاصی تبدیل ویدئو
+    VIDEO_OUTPUT_FPS = 12
+    VIDEO_MAX_DIMENSION = 480
 
     REQUEST_TIMEOUT = 45
-
     FFMPEG_TIMEOUT = 180
-
     MAX_CONCURRENT_JOBS = 1
 
     ALLOWED_EXTENSIONS = {
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".webp",
-        ".bmp",
-        ".gif",
-        ".mp4",
-        ".m4v",
-        ".mov",
-        ".webm",
-        ".mkv",
-        ".avi",
-        ".3gp",
-        ".mpeg",
-        ".mpg",
-        ".ts",
-        ".mjpeg",
+        ".jpg", ".jpeg", ".png", ".webp", ".bmp",
+        ".gif", ".mp4", ".m4v", ".mov", ".webm",
+        ".mkv", ".avi", ".3gp", ".mpeg", ".mpg",
+        ".ts", ".mjpeg",
     }
 
     def __init__(
@@ -85,23 +63,14 @@ class GifMakerFeature:
         send_message=None,
     ):
         self.token = token
-
         self.api_base_url = api_base_url.rstrip("/")
-
         self.request_timeout = request_timeout
-
         self.send_message = send_message
 
-        self.api_url = (
-            f"{self.api_base_url}/bot{self.token}"
-        )
-
-        self.file_url = (
-            f"{self.api_base_url}/file/bot{self.token}"
-        )
+        self.api_url = f"{self.api_base_url}/bot{self.token}"
+        self.file_url = f"{self.api_base_url}/file/bot{self.token}"
 
         self.session = requests.Session()
-
         self.session.headers.update({
             "User-Agent": "NevoBot-GifMaker/6.0",
         })
@@ -127,11 +96,7 @@ class GifMakerFeature:
         text = text.replace("ي", "ی")
         text = text.replace("ك", "ک")
 
-        return re.sub(
-            r"\s+",
-            " ",
-            text,
-        ).strip()
+        return re.sub(r"\s+", " ", text).strip()
 
     def _parse_command(self, message):
         if not isinstance(message, dict):
@@ -142,10 +107,7 @@ class GifMakerFeature:
         )
 
         return bool(
-            re.fullmatch(
-                r"گیف(?:\s+.+)?",
-                text,
-            )
+            re.fullmatch(r"گیف(?:\s+.+)?", text)
         )
 
     def _get_overlay_text(self, message):
@@ -162,14 +124,11 @@ class GifMakerFeature:
             return None
 
         overlay = (match.group(1) or "").strip()
-
         return overlay or None
 
     @staticmethod
     def _escape_filter_path(path):
-        """
-        Escape a filesystem path for FFmpeg filter syntax.
-        """
+        """Escape a filesystem path for FFmpeg filter syntax."""
 
         path = os.path.abspath(path)
 
@@ -272,16 +231,8 @@ class GifMakerFeature:
             }
 
         video_extensions = (
-            ".mp4",
-            ".m4v",
-            ".mov",
-            ".webm",
-            ".mkv",
-            ".avi",
-            ".3gp",
-            ".mpeg",
-            ".mpg",
-            ".ts",
+            ".mp4", ".m4v", ".mov", ".webm", ".mkv",
+            ".avi", ".3gp", ".mpeg", ".mpg", ".ts",
         )
 
         if (
@@ -294,11 +245,7 @@ class GifMakerFeature:
             }
 
         image_extensions = (
-            ".jpg",
-            ".jpeg",
-            ".png",
-            ".webp",
-            ".bmp",
+            ".jpg", ".jpeg", ".png", ".webp", ".bmp",
         )
 
         if (
@@ -319,9 +266,7 @@ class GifMakerFeature:
     def _get_file_path(self, file_id):
         response = self.session.post(
             f"{self.api_url}/getFile",
-            json={
-                "file_id": file_id,
-            },
+            json={"file_id": file_id},
             timeout=self.request_timeout,
         )
 
@@ -329,7 +274,6 @@ class GifMakerFeature:
 
         try:
             data = response.json()
-
         except ValueError as error:
             raise RuntimeError(
                 "پاسخ دریافت فایل از بله معتبر نیست."
@@ -348,7 +292,6 @@ class GifMakerFeature:
             raise RuntimeError(description)
 
         result = data.get("result") or {}
-
         file_path = result.get("file_path")
 
         if not isinstance(file_path, str) or not file_path:
@@ -365,7 +308,6 @@ class GifMakerFeature:
         fallback_extension=".bin",
     ):
         file_path = self._get_file_path(file_id)
-
         original_path = file_path.split("?")[0]
 
         extension = os.path.splitext(
@@ -376,8 +318,7 @@ class GifMakerFeature:
             extension = fallback_extension
 
         destination = (
-            os.path.splitext(destination)[0]
-            + extension
+            os.path.splitext(destination)[0] + extension
         )
 
         encoded_path = quote(
@@ -388,7 +329,6 @@ class GifMakerFeature:
         url = f"{self.file_url}/{encoded_path}"
 
         downloaded = 0
-
         started_at = time.monotonic()
 
         try:
@@ -397,7 +337,6 @@ class GifMakerFeature:
                 stream=True,
                 timeout=self.request_timeout,
             ) as response:
-
                 response.raise_for_status()
 
                 content_length = response.headers.get(
@@ -465,9 +404,7 @@ class GifMakerFeature:
         animation_path,
         reply_to_message_id=None,
     ):
-        payload = {
-            "chat_id": chat_id,
-        }
+        payload = {"chat_id": chat_id}
 
         if reply_to_message_id is not None:
             payload["reply_to_message_id"] = (
@@ -492,7 +429,6 @@ class GifMakerFeature:
 
         try:
             result = response.json()
-
         except ValueError as error:
             raise RuntimeError(
                 "پاسخ ارسال GIF معتبر نیست."
@@ -572,15 +508,11 @@ class GifMakerFeature:
             result = cls._run_process(
                 [
                     ffprobe,
-                    "-v",
-                    "error",
-                    "-select_streams",
-                    "v:0",
+                    "-v", "error",
+                    "-select_streams", "v:0",
                     "-show_entries",
-                    "stream=width,height,duration:"
-                    "format=duration",
-                    "-of",
-                    "json",
+                    "stream=width,height,duration:format=duration",
+                    "-of", "json",
                     input_path,
                 ],
                 timeout=25,
@@ -593,15 +525,17 @@ class GifMakerFeature:
                     )
 
                     streams = data.get("streams") or []
-
                     format_data = data.get("format") or {}
 
                     if streams:
                         stream = streams[0]
 
-                        width = int(stream.get("width") or 0)
-
-                        height = int(stream.get("height") or 0)
+                        width = int(
+                            stream.get("width") or 0
+                        )
+                        height = int(
+                            stream.get("height") or 0
+                        )
 
                         raw_duration = (
                             stream.get("duration")
@@ -684,20 +618,13 @@ class GifMakerFeature:
         height,
         text_shaping=True,
     ):
-        """
-        ساخت فیلتر متن.
-
-        نکته مهم:
-        fontsize و borderw اعداد ثابت هستند.
-        هیچ max(...) داخل فیلتر FFmpeg وجود ندارد.
-        """
+        """ساخت فیلتر متن."""
 
         if not overlay_text:
             return None, None
 
         text_path = output_path + ".txt"
 
-        # پاک‌سازی کاراکترهای کنترلی و ذخیره UTF-8
         safe_text = (
             str(overlay_text)
             .replace("\r", " ")
@@ -705,7 +632,11 @@ class GifMakerFeature:
             .replace("\x00", "")
         )
 
-        with open(text_path, "w", encoding="utf-8") as text_file:
+        with open(
+            text_path,
+            "w",
+            encoding="utf-8",
+        ) as text_file:
             text_file.write(safe_text)
 
         font_candidates = (
@@ -738,8 +669,6 @@ class GifMakerFeature:
                 + "'"
             )
 
-        # اندازه فونت و حاشیه در پایتون محاسبه می‌شوند.
-        # این بخش خطای Invalid chars در max(...) را رفع می‌کند.
         font_size = max(
             28,
             min(72, int(height / 8)),
@@ -755,15 +684,12 @@ class GifMakerFeature:
             "fontcolor=white",
             f"fontsize={font_size}",
             "x=(w-text_w)/2",
-            # متن در قسمت پایین، با فاصله از لبه قرار می‌گیرد.
             "y=h-text_h-(h*0.12)",
             f"borderw={border_width}",
             "bordercolor=black",
             "expansion=none",
         ])
 
-        # بعضی بیلدهای FFmpeg پشتیبانی کامل از شکل‌دهی
-        # متن راست‌به‌چپ ندارند؛ در این حالت بعداً fallback می‌کنیم.
         if text_shaping:
             parts.append("text_shaping=1")
 
@@ -829,15 +755,18 @@ class GifMakerFeature:
             kind,
             width,
             height,
-            self.OUTPUT_FPS if kind != "photo" else "still",
+            (
+                self.VIDEO_OUTPUT_FPS
+                if kind == "video"
+                else self.OUTPUT_FPS if kind == "gif"
+                else "still"
+            ),
             bool(overlay_text),
         )
 
         started_at = time.monotonic()
 
         try:
-            # اگر نسخه FFmpeg با text_shaping مشکل داشته باشد،
-            # یک بار بدون آن امتحان می‌کنیم.
             attempts = (
                 (True, False)
                 if overlay_text
@@ -850,8 +779,27 @@ class GifMakerFeature:
                 filters = []
 
                 if kind != "photo":
-                    filters.append(
-                        f"fps={self.OUTPUT_FPS}"
+                    fps = (
+                        self.VIDEO_OUTPUT_FPS
+                        if kind == "video"
+                        else self.OUTPUT_FPS
+                    )
+
+                    filters.append(f"fps={fps}")
+
+                # کوچک‌سازی فقط برای ویدئو انجام می‌شود.
+                # عکس و GIF ابعاد اصلی خود را حفظ می‌کنند.
+                if kind == "video":
+                    max_side = self.VIDEO_MAX_DIMENSION
+
+                    filters.insert(
+                        0,
+                        "scale="
+                        f"w='min({max_side},iw)':"
+                        f"h='min({max_side},ih)':"
+                        "force_original_aspect_ratio=decrease:"
+                        "force_divisible_by=2:"
+                        "flags=fast_bilinear",
                     )
 
                 text_filter, current_text_path = (
@@ -873,22 +821,22 @@ class GifMakerFeature:
                 if prefix:
                     prefix += ","
 
-                # اصلاح اختصاصی تبدیل ویدئو.
-                # مسیر عکس و GIF بدون تغییر باقی می‌ماند.
                 if kind == "video":
                     video_input = "[0:v:0]"
+
+                    # تبدیل رنگ قبل از سایر فیلترها؛
+                    # برای سازگاری بیشتر با ویدئوها.
                     prefix = "format=rgb24," + prefix
                 else:
                     video_input = "[0:v]"
 
-                # پالت اختصاصی برای بهبود رنگ‌ها.
-                # ابعاد تصویر در هیچ مرحله‌ای تغییر نمی‌کند.
+                # پالت سبک‌تر برای کاهش زمان پردازش
                 filter_graph = (
                     f"{video_input}{prefix}"
                     "split=2[main][palette_src];"
                     "[palette_src]"
                     "palettegen="
-                    "stats_mode=diff:"
+                    "stats_mode=single:"
                     "max_colors=256:"
                     "reserve_transparent=0"
                     "[palette];"
@@ -965,8 +913,6 @@ class GifMakerFeature:
                     last_error[-3000:],
                 )
 
-                # اگر متن نداریم یا خطا مربوط به shaping نیست،
-                # تکرار پردازش فایده‌ای ندارد.
                 if (
                     not overlay_text
                     or not text_shaping
@@ -1001,13 +947,14 @@ class GifMakerFeature:
                     "فایل GIF ساخته نشده یا خالی است."
                 )
 
-            # بررسی خروجی و حفظ دقیق ابعاد
             from PIL import Image
 
             with Image.open(output_path) as output_image:
                 output_width, output_height = output_image.size
 
-            if (
+            # عکس و GIF باید اندازه قبلی را حفظ کنند.
+            # ویدئو عمداً کوچک می‌شود.
+            if kind != "video" and (
                 output_width != width
                 or output_height != height
             ):
@@ -1052,7 +999,6 @@ class GifMakerFeature:
             )
 
             response.raise_for_status()
-
             data = response.json()
 
             if not data.get("ok"):
@@ -1111,11 +1057,7 @@ class GifMakerFeature:
             )
 
         try:
-            self.send_message(
-                chat_id,
-                text,
-            )
-
+            self.send_message(chat_id, text)
         except Exception:
             logger.exception(
                 "Could not notify about GIF error."
@@ -1126,9 +1068,7 @@ class GifMakerFeature:
     # ======================================
 
     def handle_message(self, message):
-        """
-        تشخیص دستور گیف و شروع پردازش در ترد جداگانه.
-        """
+        """تشخیص دستور گیف و شروع پردازش در ترد جداگانه."""
 
         if not isinstance(message, dict):
             return False
@@ -1147,7 +1087,6 @@ class GifMakerFeature:
             return False
 
         chat = message.get("chat") or {}
-
         chat_id = chat.get("id")
 
         if chat_id is None:
@@ -1204,11 +1143,9 @@ class GifMakerFeature:
         )
 
         message_id = message.get("message_id")
-
         status_message_id = None
 
         try:
-            # پیام وضعیت
             if self.send_message:
                 try:
                     status_result = self.send_message(
@@ -1233,7 +1170,6 @@ class GifMakerFeature:
                         "Could not send status message."
                     )
 
-            # فایل‌های موقت به‌صورت خودکار پاک می‌شوند.
             with tempfile.TemporaryDirectory(
                 prefix="nevobot_gif_"
             ) as temp_dir:
