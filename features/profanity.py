@@ -174,11 +174,9 @@ class ProfanityFeature:
         تشخیص شکل‌های مختلف نوشتن کلمات.
 
         مثال:
-        کسکش
-        ک س ک ش
-        ک.س.ک.ش
-        ک.........سکش
-        گس         کش
+        کلمات چسبیده
+        کلمات با فاصله
+        کلمات با نقطه یا جداکننده
         """
 
         word = ProfanityFeature.normalize_word(word)
@@ -217,9 +215,7 @@ class ProfanityFeature:
         """
         الگوهای هر درجه فقط یک‌بار ساخته می‌شوند.
 
-        نکته:
-        فهرست جدید کلمات، شکل‌های تکراری زیادی دارد.
-        قبل از ساخت الگو، کلمات نرمال و تکراری حذف می‌شوند
+        کلمات تکراری پیش از ساخت الگو حذف می‌شوند
         تا پردازش پیام‌ها بی‌دلیل سنگین نشود.
         """
 
@@ -587,17 +583,35 @@ class ProfanityFeature:
         ):
             return None
 
+        # از این نقطه به بعد، پیام به‌عنوان تخلف
+        # ضد فحش تشخیص داده شده است.
         message_id = message.get("message_id")
 
-        if self.delete_message(chat_id, message_id):
+        # حذف پیام را جداگانه ثبت می‌کنیم؛ شکست در حذف
+        # نباید باعث نادیده گرفته‌شدن تخلف شود.
+        deleted = self.delete_message(
+            chat_id,
+            message_id,
+        )
 
+        if deleted:
             logger.info(
                 "Profanity message deleted | chat_id=%s",
                 chat_id,
             )
+        else:
+            logger.warning(
+                "Profanity violation detected but deletion failed "
+                "| chat_id=%s | message_id=%s",
+                chat_id,
+                message_id,
+            )
 
-            return {
-                "deleted": True,
-            }
-
-        return None
+        # main.py از deleted=True برای ثبت تخلف استفاده می‌کند.
+        # این مقدار در اینجا به معنی «تخلف تأیید شده» است؛
+        # نتیجه واقعی حذف در deletion_succeeded قرار می‌گیرد.
+        return {
+            "deleted": True,
+            "violation": True,
+            "deletion_succeeded": deleted,
+        }
