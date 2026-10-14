@@ -588,7 +588,7 @@ class GifMakerFeature:
             )
 
         dimensions = re.search(
-            r"Video:.*?(\d{2,5})x(\d{2,5})",
+            r"Video:.*?(\d{2,5})x(\\d{2,5})",
             output,
             flags=re.IGNORECASE | re.DOTALL,
         )
@@ -775,13 +775,24 @@ class GifMakerFeature:
 
                     filters.append(f"fps={fps}")
 
-                # فقط ویدئو کوچک می‌شود.
-                # عکس و GIF ابعاد اصلی خود را حفظ می‌کنند.
+                # اصلاح رنگ ویدئو:
+                # اطلاعات رنگ پیش از scale مشخص می‌شود تا
+                # FFmpeg در تبدیل رنگ‌فضای نامشخص متوقف نشود.
+                # setparams متادیتا را تنظیم می‌کند؛ تبدیل پیکسل
+                # در مرحله‌های بعدی زنجیره فیلتر انجام می‌شود.
                 if kind == "video":
+                    filters.insert(
+                        0,
+                        "setparams="
+                        "colorspace=bt709:"
+                        "color_primaries=bt709:"
+                        "color_trc=bt709",
+                    )
+
                     max_side = self.VIDEO_MAX_DIMENSION
 
                     filters.insert(
-                        0,
+                        1,
                         "scale="
                         f"w='min({max_side},iw)':"
                         f"h='min({max_side},ih)':"
@@ -804,9 +815,6 @@ class GifMakerFeature:
                 if text_filter:
                     filters.append(text_filter)
 
-                # اصلاح اصلی:
-                # scale و fps قبل از تبدیل به RGB اجرا می‌شوند.
-                # ماتریس رنگ را به‌صورت اجباری تحمیل نمی‌کنیم.
                 prefix = ",".join(filters)
 
                 if kind == "video":
@@ -905,8 +913,6 @@ class GifMakerFeature:
                     last_error[-3000:],
                 )
 
-                # اگر مشکل از text_shaping باشد،
-                # بار دوم بدون آن امتحان می‌کنیم.
                 if (
                     not overlay_text
                     or not text_shaping
