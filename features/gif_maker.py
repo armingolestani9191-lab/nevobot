@@ -873,10 +873,18 @@ class GifMakerFeature:
                 if prefix:
                     prefix += ","
 
+                # اصلاح اختصاصی تبدیل ویدئو.
+                # مسیر عکس و GIF بدون تغییر باقی می‌ماند.
+                if kind == "video":
+                    video_input = "[0:v:0]"
+                    prefix = "format=rgb24," + prefix
+                else:
+                    video_input = "[0:v]"
+
                 # پالت اختصاصی برای بهبود رنگ‌ها.
                 # ابعاد تصویر در هیچ مرحله‌ای تغییر نمی‌کند.
                 filter_graph = (
-                    f"[0:v]{prefix}"
+                    f"{video_input}{prefix}"
                     "split=2[main][palette_src];"
                     "[palette_src]"
                     "palettegen="
