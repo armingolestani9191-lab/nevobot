@@ -1,6 +1,6 @@
 # ==========================================
 # NevoBot | GIF Maker
-# Full replacement for features/gif_maker.py
+# Fixed video color-space filter ordering
 # ==========================================
 
 import os
@@ -37,10 +37,7 @@ class GifMakerFeature:
     MAX_DIMENSION = 4096
     MAX_PIXELS = 12_000_000
 
-    # تنظیمات سبک‌تر برای پردازش GIF
     OUTPUT_FPS = 12
-
-    # تنظیمات اختصاصی تبدیل ویدئو
     VIDEO_OUTPUT_FPS = 12
     VIDEO_MAX_DIMENSION = 480
 
@@ -164,7 +161,6 @@ class GifMakerFeature:
         if not isinstance(reply, dict):
             return None
 
-        # GIF / animation
         animation = reply.get("animation")
 
         if GifMakerFeature._valid_file_id(animation):
@@ -173,7 +169,6 @@ class GifMakerFeature:
                 "kind": "gif",
             }
 
-        # Video
         for field in ("video", "video_note"):
             video = reply.get(field)
 
@@ -183,7 +178,6 @@ class GifMakerFeature:
                     "kind": "video",
                 }
 
-        # Photo
         photos = reply.get("photo")
 
         if isinstance(photos, list) and photos:
@@ -207,7 +201,6 @@ class GifMakerFeature:
                     "kind": "photo",
                 }
 
-        # Document
         document = reply.get("document")
 
         if not GifMakerFeature._valid_file_id(document):
@@ -558,7 +551,6 @@ class GifMakerFeature:
                         "Could not parse ffprobe output."
                     )
 
-        # Fallback when ffprobe is missing or fails.
         result = cls._run_process(
             [
                 ffmpeg,
@@ -618,8 +610,6 @@ class GifMakerFeature:
         height,
         text_shaping=True,
     ):
-        """ساخت فیلتر متن."""
-
         if not overlay_text:
             return None, None
 
@@ -773,8 +763,6 @@ class GifMakerFeature:
                 else (False,)
             )
 
-            last_error = ""
-
             for text_shaping in attempts:
                 filters = []
 
@@ -787,7 +775,7 @@ class GifMakerFeature:
 
                     filters.append(f"fps={fps}")
 
-                # کوچک‌سازی فقط برای ویدئو انجام می‌شود.
+                # فقط ویدئو کوچک می‌شود.
                 # عکس و GIF ابعاد اصلی خود را حفظ می‌کنند.
                 if kind == "video":
                     max_side = self.VIDEO_MAX_DIMENSION
@@ -816,21 +804,25 @@ class GifMakerFeature:
                 if text_filter:
                     filters.append(text_filter)
 
+                # اصلاح اصلی:
+                # scale و fps قبل از تبدیل به RGB اجرا می‌شوند.
+                # ماتریس رنگ را به‌صورت اجباری تحمیل نمی‌کنیم.
                 prefix = ",".join(filters)
-
-                if prefix:
-                    prefix += ","
 
                 if kind == "video":
                     video_input = "[0:v:0]"
 
-                    # تبدیل رنگ قبل از سایر فیلترها؛
-                    # برای سازگاری بیشتر با ویدئوها.
-                    prefix = "format=rgb24," + prefix
+                    if prefix:
+                        prefix += ","
+
+                    prefix += "format=rgb24,"
+
                 else:
                     video_input = "[0:v]"
 
-                # پالت سبک‌تر برای کاهش زمان پردازش
+                    if prefix:
+                        prefix += ","
+
                 filter_graph = (
                     f"{video_input}{prefix}"
                     "split=2[main][palette_src];"
@@ -913,6 +905,8 @@ class GifMakerFeature:
                     last_error[-3000:],
                 )
 
+                # اگر مشکل از text_shaping باشد،
+                # بار دوم بدون آن امتحان می‌کنیم.
                 if (
                     not overlay_text
                     or not text_shaping
@@ -952,8 +946,6 @@ class GifMakerFeature:
             with Image.open(output_path) as output_image:
                 output_width, output_height = output_image.size
 
-            # عکس و GIF باید اندازه قبلی را حفظ کنند.
-            # ویدئو عمداً کوچک می‌شود.
             if kind != "video" and (
                 output_width != width
                 or output_height != height
