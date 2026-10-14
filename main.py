@@ -33,6 +33,9 @@ from features.profanity import ProfanityFeature
 from features.warnings import WarningsFeature
 from features.panel import PanelFeature
 
+# قابلیت جدید گیف‌ساز
+from features.gif_maker import GifMakerFeature
+
 
 # ==========================================
 #                  Logging
@@ -155,6 +158,17 @@ class NevoBot:
             spam_feature=self.spam_feature,
             profanity_feature=self.profanity_feature,
             warnings_feature=self.warnings_feature,
+        )
+
+        # --------------------------------------
+        #               GIF Maker
+        # --------------------------------------
+
+        self.gif_maker_feature = GifMakerFeature(
+            token=BOT_TOKEN,
+            api_base_url=API_BASE_URL,
+            request_timeout=REQUEST_TIMEOUT,
+            send_message=self.send_message,
         )
 
         logger.info(
@@ -1006,6 +1020,22 @@ class NevoBot:
 
                 if self.whisper_feature.handle_message(message):
                     return
+
+            # ----------------------------------
+            #                GIF Maker
+            # ----------------------------------
+
+            # فقط دستور گیف روی رسانه را پردازش می‌کند.
+            # پیام‌های دیگر به مسیر قبلی ربات می‌روند.
+            try:
+                if self.gif_maker_feature.handle_message(message):
+                    return
+
+            except Exception:
+                logger.exception(
+                    "GIF maker handler failed | chat=%s",
+                    chat_id,
+                )
 
             # ----------------------------------
             #             Moderation
