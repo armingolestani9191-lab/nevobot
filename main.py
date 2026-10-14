@@ -19,6 +19,7 @@ from database import (
 from keyboards import main_menu
 
 from features.ban import BanFeature
+from features.locks import LocksFeature
 from features.moderators import ModeratorsFeature
 from features.mute import MuteFeature
 from features.spam import SpamFeature
@@ -73,6 +74,12 @@ class NevoBot:
         )
 
         self.spam_feature = SpamFeature(
+            api=self.api,
+            is_authorized=self.is_moderation_authorized,
+        )
+
+        # اتصال قابلیت قفل رسانه‌ها
+        self.locks_feature = LocksFeature(
             api=self.api,
             is_authorized=self.is_moderation_authorized,
         )
@@ -389,7 +396,7 @@ class NevoBot:
     # ==========================================
 
     def handle_moderation(self, message):
-        """پردازش ناظرها، سکوت، ضداسپم و بن."""
+        """پردازش ناظرها، سکوت، قفل‌ها، ضداسپم و بن."""
 
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
@@ -397,6 +404,7 @@ class NevoBot:
         if chat_id is None:
             return False
 
+        # مدیریت ناظرها
         moderator_result = (
             self.moderators_feature.handle_message(
                 message
@@ -413,6 +421,7 @@ class NevoBot:
             )
             return True
 
+        # قابلیت سکوت
         mute_result = (
             self.mute_feature.handle_message(
                 message
@@ -429,6 +438,23 @@ class NevoBot:
             )
             return True
 
+        # قابلیت قفل رسانه‌ها
+        locks_result = (
+            self.locks_feature.handle_message(
+                message
+            )
+        )
+
+        if locks_result is not None:
+            if "text" in locks_result:
+                self.send_message(
+                    chat_id,
+                    locks_result["text"],
+                )
+
+            return True
+
+        # قابلیت ضداسپم
         spam_result = (
             self.spam_feature.handle_message(
                 message
@@ -444,6 +470,7 @@ class NevoBot:
 
             return True
 
+        # قابلیت بن، آنبن و اخراج
         result = self.ban_feature.handle_message(
             message
         )
@@ -550,7 +577,7 @@ class NevoBot:
             if self.whisper_feature.handle_message(message):
                 return
 
-            # فرمان‌های مدیریتی و ضداسپم
+            # فرمان‌های مدیریتی، قفل‌ها و ضداسپم
             if self.handle_moderation(message):
                 return
 
@@ -642,6 +669,9 @@ class NevoBot:
         logger.info("Initializing database...")
 
         init_database()
+
+        # راه‌اندازی دیتابیس اختصاصی قفل رسانه‌ها
+        self.locks_feature.init_database()
 
         # راه‌اندازی دیتابیس اختصاصی نجوا
         self.whisper_feature.init_database()
