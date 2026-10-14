@@ -646,6 +646,7 @@ class GifMakerFeature:
                 # setparams متادیتا را تنظیم می‌کند؛ تبدیل پیکسل
                 # در مرحله‌های بعدی زنجیره فیلتر انجام می‌شود.
                 if kind == "video":
+                    max_side = self.VIDEO_MAX_DIMENSION
                     filters.insert(
                         0,
                         "scale="
