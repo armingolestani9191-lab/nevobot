@@ -419,7 +419,7 @@ class GifMakerFeature:
         text,
         destination,
     ):
-        """ساخت لایه شفاف متن فارسی."""
+        """ساخت لایه شفاف متن فارسی با فونت ضخیم."""
 
         try:
             from PIL import (
@@ -440,8 +440,11 @@ class GifMakerFeature:
 
         text = text.replace("\n", " ").strip()
 
-        # در صورت وجود RAQM، خود Pillow شکل حروف فارسی
-        # و جهت راست‌به‌چپ را مدیریت می‌کند.
+        if not text:
+            raise ValueError("متن گیف نمی‌تواند خالی باشد.")
+
+        # استفاده از RAQM برای شکل‌دهی حروف فارسی
+        # و نمایش صحیح متن راست‌به‌چپ.
         use_raqm = features.check_feature("raqm")
 
         if use_raqm:
@@ -453,7 +456,7 @@ class GifMakerFeature:
             }
 
         else:
-            # روش جایگزین برای Pillowهایی که RAQM ندارند.
+            # روش جایگزین در صورت نبودن RAQM
             reshaped = arabic_reshaper.reshape(text)
             display_text = get_display(reshaped)
 
@@ -467,59 +470,103 @@ class GifMakerFeature:
 
         draw = ImageDraw.Draw(overlay)
 
-        # فونت مناسب فارسی؛ Noto در Docker نصب می‌شود.
+        # اولویت با فونت واقعی Bold فارسی است.
+        # این مسیرها با بسته fonts-noto-core سازگارند.
         font_candidates = [
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoKufiArabic-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
             "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         ]
 
-        font = None
-
+        # افزایش اندازه متن نسبت به نسخه قبلی:
+        # قبلاً عرض تصویر تقسیم بر ۱۶ می‌شد؛
+        # اکنون اندازه متن بزرگ‌تر انتخاب می‌شود.
         font_size = max(
-            18,
-            min(64, width // 16),
+            24,
+            min(88, width // 12),
         )
-
-        for font_path in font_candidates:
-            if os.path.isfile(font_path):
-                try:
-                    font = ImageFont.truetype(
-                        font_path,
-                        font_size,
-                        layout_engine=(
-                            ImageFont.Layout.RAQM
-                            if use_raqm
-                            else ImageFont.Layout.BASIC
-                        ),
-                    )
-
-                    break
-
-                except OSError:
-                    continue
-
-        if font is None:
-            font = ImageFont.load_default()
 
         max_width = max(50, width - 32)
 
-        # شکستن متن‌های طولانی به چند خط
+        font = None
+
+        # اگر متن طولانی باشد، اندازه فونت به‌تدریج
+        # کم می‌شود تا متن از عرض تصویر بیرون نزند.
+        while font_size >= 20:
+            for font_path in font_candidates:
+                if not os.path.isfile(font_path):
+                    continue
+
+                try:
+                    layout_engine = (
+                        ImageFont.Layout.RAQM
+                        if use_raqm
+                        else ImageFont.Layout.BASIC
+                    )
+
+                    candidate_font = ImageFont.truetype(
+                        font_path,
+                        font_size,
+                        layout_engine=layout_engine,
+                    )
+
+                    font = candidate_font
+                    break
+
+                except (OSError, ValueError):
+                    continue
+
+            if font is None:
+                font_size -= 2
+                continue
+
+            # اندازه‌گیری متن با فونت انتخاب‌شده
+            words = display_text.split()
+
+            widest_word = 0
+
+            for word in words:
+                box = draw.textbbox(
+                    (0, 0),
+                    word,
+                    font=font,
+                    stroke_width=3,
+                    **text_kwargs,
+                )
+
+                widest_word = max(
+                    widest_word,
+                    box[2] - box[0],
+                )
+
+            if widest_word <= max_width:
+                break
+
+            font = None
+            font_size -= 2
+
+        if font is None:
+            raise RuntimeError(
+                "فونت مناسب برای نمایش متن پیدا نشد."
+            )
+
+        # شکستن متن به خطوط متناسب با عرض تصویر
         words = display_text.split()
 
         lines = []
         current = ""
 
         for word in words:
-            candidate = (
-                f"{current} {word}".strip()
-            )
+            candidate = f"{current} {word}".strip()
 
             box = draw.textbbox(
                 (0, 0),
                 candidate,
                 font=font,
-                stroke_width=2,
+                stroke_width=3,
                 **text_kwargs,
             )
 
@@ -535,17 +582,24 @@ class GifMakerFeature:
         if current:
             lines.append(current)
 
+        # ارتفاع هر خط متناسب با اندازه فونت
         line_height = max(
-            font_size + 8,
-            28,
+            font_size + 12,
+            30,
         )
 
         total_height = line_height * len(lines)
 
-        # متن کمی بالاتر از محل قبلی قرار می‌گیرد.
+        # قرارگیری متن در پایین تصویر، کمی بالاتر از لبه
         y = max(
             8,
-            height - total_height - 48,
+            height - total_height - max(32, height // 18),
+        )
+
+        # حاشیه ضخیم‌تر برای خوانایی بهتر
+        stroke_width = max(
+            2,
+            min(4, font_size // 14),
         )
 
         for line in lines:
@@ -553,24 +607,25 @@ class GifMakerFeature:
                 (0, 0),
                 line,
                 font=font,
-                stroke_width=2,
+                stroke_width=stroke_width,
                 **text_kwargs,
             )
 
             text_width = box[2] - box[0]
 
+            # وسط‌چین کردن متن
             x = max(
                 8,
-                (width - text_width) // 2,
+                (width - text_width) // 2 - box[0],
             )
 
             draw.text(
-                (x, y),
+                (x, y - box[1]),
                 line,
                 font=font,
                 fill=(255, 255, 255, 255),
-                stroke_width=2,
-                stroke_fill=(0, 0, 0, 220),
+                stroke_width=stroke_width,
+                stroke_fill=(0, 0, 0, 235),
                 **text_kwargs,
             )
 
@@ -628,8 +683,7 @@ class GifMakerFeature:
                 "برای ساخت سریع گیف، طول فیلم باید حداکثر ۱۵ ثانیه باشد."
             )
 
-        # لایه متن یک تصویر PNG ثابت است؛ آن را حلقه‌ای می‌خوانیم
-        # تا در طول تمام فریم‌ها قابل استفاده باشد.
+        # لایه متن ثابت است و در تمام فریم‌ها استفاده می‌شود.
         overlay_input = [
             "-loop",
             "1",
@@ -649,7 +703,7 @@ class GifMakerFeature:
         )
 
         if kind == "photo":
-            # عکس به GIF کوتاه دوثانیه‌ای تبدیل می‌شود.
+            # عکس به GIF دوثانیه‌ای تبدیل می‌شود.
             command = [
                 ffmpeg,
                 "-y",
@@ -674,7 +728,6 @@ class GifMakerFeature:
 
         else:
             # ویدیو یا GIF؛ بدون تغییر اندازه اجباری
-            # و بدون فیلتر تغییر سرعت.
             command = [
                 ffmpeg,
                 "-y",
@@ -905,7 +958,7 @@ class GifMakerFeature:
                         "ابعاد رسانه قابل تشخیص نیست."
                     )
 
-                # ساخت متن با همان ابعاد رسانه
+                # ساخت لایه متن با همان ابعاد رسانه
                 self._create_text_overlay(
                     width,
                     height,
