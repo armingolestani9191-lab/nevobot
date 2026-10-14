@@ -4,6 +4,7 @@
 
 import logging
 import time
+import threading
 
 from database import get_connection
 
@@ -18,6 +19,8 @@ logger = logging.getLogger("NevoBot.Warnings")
 DEFAULT_MAX_WARNINGS = 3
 DEFAULT_PUNISHMENT = "kick"
 DEFAULT_ENABLED = True
+
+WARNING_DELETE_DELAY = 7
 
 VALID_PUNISHMENTS = {
     "kick",
@@ -48,6 +51,8 @@ class WarningsFeature:
         - انتخاب مجازات نهایی
         - ثبت تعداد اخطارهای هر کاربر
         - اجرای مجازات پس از رسیدن به سقف
+        - ارسال پیام اخطار موقت
+        - حذف خودکار پیام اخطار پس از ۷ ثانیه
 
     نکته:
         ثبت اخطار باید فقط پس از تأیید تخلف واقعی
@@ -372,11 +377,15 @@ class WarningsFeature:
 
         settings = self.get_settings(chat_id)
 
+        try:
+            amount = int(amount)
+        except (TypeError, ValueError):
+            return None
+
         new_value = (
-            settings["max_warnings"] + int(amount)
+            settings["max_warnings"] + amount
         )
 
-        # حداقل سقف اخطار یک عدد است.
         new_value = max(
             1,
             min(new_value, 100),
@@ -683,7 +692,6 @@ class WarningsFeature:
             return False
 
         try:
-            # از همان تابع داخلی قابلیت سکوت فعلی استفاده می‌کنیم.
             result = self.mute_feature._api_restrict(
                 chat_id,
                 user_id,
@@ -740,10 +748,10 @@ class WarningsFeature:
 
     def _notify(self, chat_id, text):
         """
-        ارسال پیام اطلاع‌رسانی.
+        ارسال پیام اطلاع‌رسانی معمولی.
 
-        اگر تابع ارسال پیام به کلاس متصل نشده باشد،
-        فقط رویداد در لاگ ثبت می‌شود.
+        پیام‌های این تابع خودکار حذف نمی‌شوند؛
+        برای مثال پیام نتیجه مجازات نهایی.
         """
 
         if not callable(self.send_message):
@@ -772,6 +780,154 @@ class WarningsFeature:
             )
 
             return False
+
+    # ======================================
+    #          Temporary Warning Message
+    # ======================================
+
+    def _delete_warning_message_later(
+        self,
+        chat_id,
+        message_id,
+    ):
+        """
+        حذف پیام اخطار پس از گذشت زمان مشخص‌شده.
+
+        از Timer استفاده می‌شود تا اجرای ربات
+        برای ۷ ثانیه متوقف نشود.
+        """
+
+        if chat_id is None or message_id is None:
+            return
+
+        try:
+            result = self.api(
+                "deleteMessage",
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                },
+            )
+
+            if (
+                not isinstance(result, dict)
+                or result.get("ok") is not True
+            ):
+                logger.warning(
+                    "Temporary warning deletion failed | "
+                    "chat=%s | message=%s | response=%r",
+                    chat_id,
+                    message_id,
+                    result,
+                )
+                return
+
+            logger.debug(
+                "Temporary warning deleted | "
+                "chat=%s | message=%s",
+                chat_id,
+                message_id,
+            )
+
+        except Exception:
+            logger.exception(
+                "Could not delete temporary warning | "
+                "chat=%s | message=%s",
+                chat_id,
+                message_id,
+            )
+
+    def _notify_temporary(self, chat_id, text):
+        """
+        ارسال پیام موقت و زمان‌بندی حذف آن.
+
+        فقط پیام اخطار حذف می‌شود؛
+        پیام مجازات نهایی با این تابع ارسال نمی‌شود.
+        """
+
+        if not callable(self.send_message):
+            logger.info(
+                "Temporary warning | chat=%s | text=%s",
+                chat_id,
+                text,
+            )
+            return False
+
+        try:
+            result = self.send_message(
+                chat_id,
+                text,
+            )
+
+        except Exception:
+            logger.exception(
+                "Could not send temporary warning | chat=%s",
+                chat_id,
+            )
+            return False
+
+        if not isinstance(result, dict) or not result.get("ok"):
+            logger.warning(
+                "Temporary warning send failed | "
+                "chat=%s | response=%r",
+                chat_id,
+                result,
+            )
+            return False
+
+        message = result.get("result") or {}
+        message_id = message.get("message_id")
+
+        if message_id is None:
+            logger.warning(
+                "Warning sent without message_id | chat=%s",
+                chat_id,
+            )
+            return True
+
+        timer = threading.Timer(
+            WARNING_DELETE_DELAY,
+            self._delete_warning_message_later,
+            args=(
+                chat_id,
+                message_id,
+            ),
+        )
+
+        timer.daemon = True
+        timer.start()
+
+        return True
+
+    # ======================================
+    #             Warning Text
+    # ======================================
+
+    @staticmethod
+    def _build_warning_text(
+        user_id,
+        warning_count,
+        max_warnings,
+        reason,
+    ):
+        """ساخت متن اخطار بر اساس نوع تخلف."""
+
+        reason = str(reason or "").strip()
+
+        if "اسپم" in reason:
+            message = "🚫 لطفاً اسپم نکن!"
+
+        elif "فحش" in reason:
+            message = "🤬 لطفاً فحش نده!"
+
+        else:
+            message = "⚠️ لطفاً قوانین گروه را رعایت کن!"
+
+        return (
+            f"{message}\n\n"
+            f"👤 شناسه کاربر: {user_id}\n"
+            f"⚠️ اخطار {warning_count} از {max_warnings}"
+        )
 
     # ======================================
     #             Record Violation
@@ -918,6 +1074,19 @@ class WarningsFeature:
             reason,
         )
 
+        # ارسال اخطار موقت برای هر تخلف ثبت‌شده.
+        warning_text = self._build_warning_text(
+            user_id=user_id,
+            warning_count=warning_count,
+            max_warnings=max_warnings,
+            reason=reason,
+        )
+
+        self._notify_temporary(
+            chat_id,
+            warning_text,
+        )
+
         # هنوز سقف اخطار تکمیل نشده است.
         if warning_count < max_warnings:
             return {
@@ -970,6 +1139,7 @@ class WarningsFeature:
                 f"🔨 مجازات اجراشده: {punishment_name}"
             )
 
+            # این پیام دائمی است و پس از ۷ ثانیه حذف نمی‌شود.
             self._notify(
                 chat_id,
                 notification_text,
@@ -1009,4 +1179,4 @@ class WarningsFeature:
             "punished": punished,
             "punishment": punishment,
             "reason": reason,
-      }
+        }
