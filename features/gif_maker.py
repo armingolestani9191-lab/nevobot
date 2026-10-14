@@ -643,8 +643,6 @@ class GifMakerFeature:
                 # اصلاح رنگ ویدئو:
                 # اطلاعات رنگ پیش از scale مشخص می‌شود تا
                 # FFmpeg در تبدیل رنگ‌فضای نامشخص متوقف نشود.
-                # setparams متادیتا را تنظیم می‌کند؛ تبدیل پیکسل
-                # در مرحله‌های بعدی زنجیره فیلتر انجام می‌شود.
                 if kind == "video":
                     max_side = self.VIDEO_MAX_DIMENSION
                     filters.insert(
