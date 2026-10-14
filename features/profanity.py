@@ -18,7 +18,10 @@ from features.profanity_words import (
 logger = logging.getLogger("NevoBot.Profanity")
 
 
-# حروفی که در پیام‌های فارسی و عربی معادل هستند.
+# ==========================================
+#          Persian Character Mapping
+# ==========================================
+
 CHAR_REPLACEMENTS = str.maketrans({
     "ي": "ی",
     "ى": "ی",
@@ -131,7 +134,7 @@ class ProfanityFeature:
 
         text = text.translate(CHAR_REPLACEMENTS)
 
-        # یکسان‌سازی نیم‌فاصله و حذف کنترل‌های نامرئی
+        # یکسان‌سازی نیم‌فاصله و حذف کاراکترهای نامرئی
         text = text.replace("\u200c", " ")
         text = text.replace("\u200d", "")
         text = text.replace("\u200e", "")
@@ -161,20 +164,21 @@ class ProfanityFeature:
         )
 
     # ==========================================
-    #            Compiled Detection
+    #           Compiled Detection
     # ==========================================
 
     @staticmethod
     @lru_cache(maxsize=4096)
     def make_flexible_pattern(word, separator_limit):
         """
-        ساخت الگوی آماده برای تشخیص حروفی که بینشان
-        فاصله یا علامت قرار گرفته است.
+        تشخیص شکل‌های مختلف نوشتن کلمات.
 
-        نمونه‌ها:
+        مثال:
+        کسکش
         ک س ک ش
         ک.س.ک.ش
         ک.........سکش
+        گس         کش
         """
 
         word = ProfanityFeature.normalize_word(word)
@@ -182,7 +186,7 @@ class ProfanityFeature:
         if not word:
             return None
 
-        # کلمات بسیار کوتاه فقط به شکل مستقل بررسی می‌شوند.
+        # کلمات کوتاه فقط به شکل مستقل بررسی می‌شوند.
         if len(word) <= 2:
             return re.compile(
                 r"(?<!\w)"
@@ -212,47 +216,60 @@ class ProfanityFeature:
     def get_detection_patterns(cls, level):
         """
         الگوهای هر درجه فقط یک‌بار ساخته می‌شوند.
-        این کار از ساخت دوباره آن‌ها برای هر پیام جلوگیری می‌کند.
+
+        نکته:
+        فهرست جدید کلمات، شکل‌های تکراری زیادی دارد.
+        قبل از ساخت الگو، کلمات نرمال و تکراری حذف می‌شوند
+        تا پردازش پیام‌ها بی‌دلیل سنگین نشود.
         """
 
         if level not in PROFANITY_LEVELS:
             level = DEFAULT_LEVEL
 
         config = PROFANITY_LEVELS[level]
-
         separator_limit = config["separator_limit"]
+
+        # حذف کلمات تکراری پس از نرمال‌سازی
+        normalized_words = {
+            cls.normalize_word(word)
+            for word in config["words"]
+        }
+
+        normalized_words.discard("")
 
         patterns = []
 
-        for word in config["words"]:
-            normalized = cls.normalize_word(word)
+        for normalized in normalized_words:
 
-            if not normalized:
-                continue
-
-            # در آسان فقط شکل معمول کلمه بررسی می‌شود.
+            # در درجه آسان، فقط شکل عادی کلمه بررسی می‌شود.
             if separator_limit == 0:
                 pattern = re.compile(
                     r"(?<!\w)"
                     + re.escape(normalized)
                     + r"(?!\w)"
                 )
+
             else:
                 pattern = cls.make_flexible_pattern(
                     normalized,
                     separator_limit,
                 )
 
-            patterns.append(pattern)
+            if pattern is not None:
+                patterns.append(pattern)
 
         return tuple(patterns)
 
     # ==========================================
-    #             Profanity Detection
+    #            Profanity Detection
     # ==========================================
 
     @classmethod
-    def contains_profanity(cls, text, level=DEFAULT_LEVEL):
+    def contains_profanity(
+        cls,
+        text,
+        level=DEFAULT_LEVEL,
+    ):
         if not text:
             return False
 
@@ -267,41 +284,49 @@ class ProfanityFeature:
             for word in SAFE_WORDS
         }
 
-        # کلمات عادی مستقل را از بررسی دقیق کنار می‌گذاریم.
-        # البته وجود فحش دیگری در همان پیام همچنان بررسی می‌شود.
         safe_token_set = set(tokens)
 
-        patterns = cls.get_detection_patterns(level)
+        # --------------------------------------
+        #                EASY
+        # --------------------------------------
 
-        # در حالت آسان، تطبیق روی کلمات و عبارت‌های معمولی است.
         if level == "easy":
+
+            easy_words = {
+                cls.normalize_word(word)
+                for word in PROFANITY_LEVELS["easy"]["words"]
+            }
+
+            easy_words.discard("")
+
+            # بررسی کلمات مستقل
             for token in tokens:
                 normalized_token = cls.normalize_word(token)
 
                 if normalized_token in safe_words:
                     continue
 
-                for word in PROFANITY_LEVELS["easy"]["words"]:
-                    normalized_bad = cls.normalize_word(word)
+                if normalized_token in easy_words:
+                    return True
 
-                    if not normalized_bad:
-                        continue
+            # بررسی عبارت‌های چندکلمه‌ای
+            text_with_spaces = re.sub(
+                r"\s+",
+                " ",
+                normalized_text,
+            ).strip()
 
-                    if normalized_token == normalized_bad:
-                        return True
-
-            # عبارت‌های چندکلمه‌ای در حالت آسان
             for word in PROFANITY_LEVELS["easy"]["words"]:
-                if " " not in word:
+
+                if " " not in word and "\u200c" not in word:
                     continue
 
                 phrase = cls.normalize_characters(word)
-                phrase = re.sub(r"\s+", " ", phrase).strip()
 
-                text_with_spaces = re.sub(
+                phrase = re.sub(
                     r"\s+",
                     " ",
-                    normalized_text,
+                    phrase.replace("\u200c", " "),
                 ).strip()
 
                 if phrase and phrase in text_with_spaces:
@@ -309,11 +334,13 @@ class ProfanityFeature:
 
             return False
 
-        # متوسط و سخت‌گیرانه از الگوهای آماده استفاده می‌کنند.
-        # این کار فاصله‌ها و علائم میان حروف را تشخیص می‌دهد.
+        # --------------------------------------
+        #             MEDIUM / STRICT
+        # --------------------------------------
+
+        patterns = cls.get_detection_patterns(level)
+
         for pattern in patterns:
-            if pattern is None:
-                continue
 
             match = pattern.search(normalized_text)
 
@@ -323,12 +350,13 @@ class ProfanityFeature:
             matched_text = match.group(0)
             matched_word = cls.normalize_word(matched_text)
 
-            # جلوگیری از برخی تطبیق‌های اشتباه روی واژه‌های عادی
+            # جلوگیری از حذف بعضی کلمات عادی
             if matched_word in safe_words:
                 continue
 
-            # اگر فقط یک کلمه عادی با الگو تطبیق کرده باشد،
-            # آن را فحش محسوب نمی‌کنیم.
+            # کلمات عادیِ موجود در پیام را بررسی می‌کنیم،
+            # اما فحش‌های دیگری که در همان پیام هستند
+            # همچنان قابل تشخیص‌اند.
             if matched_word in safe_token_set:
                 if matched_word in safe_words:
                     continue
@@ -421,8 +449,10 @@ class ProfanityFeature:
         # ==========================================
 
         if command in commands:
+
             try:
                 authorized = self.is_authorized(message)
+
             except Exception:
                 logger.exception(
                     "Could not verify moderation authorization."
@@ -442,9 +472,12 @@ class ProfanityFeature:
 
             settings = self.get_settings(chat_id)
 
+            # --------------------------------------
+            #             Enable Filter
+            # --------------------------------------
+
             if command == "ضد فحش روشن":
-                # طبق درخواست: با روشن کردن ضد فحش،
-                # درجه روی سخت‌گیرانه قرار می‌گیرد.
+
                 self.save_settings(
                     chat_id,
                     enabled=True,
@@ -455,11 +488,16 @@ class ProfanityFeature:
                     "text": (
                         "🛡️ ضد فحش فعال شد.\n\n"
                         "🔴 درجه پیش‌فرض: سخت‌گیرانه\n"
-                        "تمام فحش‌های فهرست این درجه بررسی می‌شوند."
+                        "فهرست کلمات درجه سخت‌گیرانه بررسی می‌شود."
                     )
                 }
 
+            # --------------------------------------
+            #             Disable Filter
+            # --------------------------------------
+
             if command == "ضد فحش خاموش":
+
                 self.save_settings(
                     chat_id,
                     enabled=False,
@@ -469,7 +507,12 @@ class ProfanityFeature:
                     "text": "🔓 ضد فحش غیرفعال شد."
                 }
 
+            # --------------------------------------
+            #              Show Status
+            # --------------------------------------
+
             if command == "ضد فحش":
+
                 status = (
                     "روشن 🟢"
                     if settings["enabled"]
@@ -487,6 +530,10 @@ class ProfanityFeature:
                         f"درجه سخت‌گیری: {level_name}"
                     )
                 }
+
+            # --------------------------------------
+            #             Change Level
+            # --------------------------------------
 
             level_commands = {
                 "درجه فحش آسان": "easy",
@@ -526,7 +573,7 @@ class ProfanityFeature:
                 "Authorization check failed for profanity filter."
             )
 
-            # در صورت خطا، پیام را حذف نمی‌کنیم.
+            # در صورت خطا، پیام حذف نمی‌شود.
             return None
 
         settings = self.get_settings(chat_id)
@@ -543,6 +590,7 @@ class ProfanityFeature:
         message_id = message.get("message_id")
 
         if self.delete_message(chat_id, message_id):
+
             logger.info(
                 "Profanity message deleted | chat_id=%s",
                 chat_id,
