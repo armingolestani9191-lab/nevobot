@@ -20,21 +20,19 @@ logger = logging.getLogger("NevoBot.GifMaker")
 
 class GifMakerFeature:
     """
-    ساخت گیف با متن فارسی روی عکس، فیلم یا گیف.
+    تبدیل عکس، ویدئو یا GIF ریپلای‌شده به GIF بدون افزودن متن.
 
     دستور استفاده:
-        روی عکس، فیلم یا گیف ریپلای کن:
-        گیف متن دلخواه
+        روی عکس، فیلم یا گیف ریپلای کن و بنویس:
+        گیف
     """
 
     MAX_DOWNLOAD_SIZE = 20 * 1024 * 1024
     MAX_DURATION = 15
-    MAX_TEXT_LENGTH = 150
     MAX_CONCURRENT_JOBS = 2
 
-    # حداکثر نرخ فریم برای افزایش سرعت پردازش.
-    # ابعاد تصویر تغییر نمی‌کند.
-    OUTPUT_FPS = 12
+    # نرخ فریم بالاتر برای خروجی روان‌تر؛ ابعاد دست‌نخورده می‌ماند.
+    OUTPUT_FPS = 20
 
     ALLOWED_EXTENSIONS = {
         ".jpg",
@@ -106,30 +104,23 @@ class GifMakerFeature:
         return text.strip()
 
     def _parse_command(self, message):
-        """استخراج متن دستور گیف."""
+        """تشخیص دستور ساده «گیف» بدون متن روی تصویر."""
 
         text = message.get("text") or ""
 
         if not isinstance(text, str):
-            return None
+            return False
 
         normalized = self.normalize_text(text)
 
-        match = re.match(
-            r"^گیف\s+(.+)$",
-            normalized,
-            flags=re.IGNORECASE,
+        # فقط خود دستور «گیف»؛ هیچ متنی روی رسانه نوشته نمی‌شود.
+        return bool(
+            re.fullmatch(
+                r"گیف",
+                normalized,
+                flags=re.IGNORECASE,
+            )
         )
-
-        if not match:
-            return None
-
-        overlay_text = match.group(1).strip()
-
-        if not overlay_text:
-            return None
-
-        return overlay_text[:self.MAX_TEXT_LENGTH]
 
     # ======================================
     #              Media Helpers
@@ -678,229 +669,6 @@ class GifMakerFeature:
         return duration, width, height
 
     # ======================================
-    #                Text Overlay
-    # ======================================
-
-    @staticmethod
-    def _create_text_overlay(
-        width,
-        height,
-        text,
-        destination,
-    ):
-        """ساخت لایه متن فارسی ضخیم و شفاف."""
-
-        try:
-            from PIL import (
-                Image,
-                ImageDraw,
-                ImageFont,
-                features,
-            )
-
-            import arabic_reshaper
-
-            from bidi.algorithm import get_display
-
-        except ImportError as error:
-            raise RuntimeError(
-                "کتابخانه‌های Pillow و فارسی‌نویسی نصب نیستند."
-            ) from error
-
-        text = text.replace("\n", " ").strip()
-
-        if not text:
-            raise ValueError(
-                "متن گیف نمی‌تواند خالی باشد."
-            )
-
-        use_raqm = features.check_feature("raqm")
-
-        if use_raqm:
-            display_text = text
-
-            text_kwargs = {
-                "direction": "rtl",
-                "language": "fa",
-            }
-
-        else:
-            reshaped = arabic_reshaper.reshape(text)
-            display_text = get_display(reshaped)
-
-            text_kwargs = {}
-
-        overlay = Image.new(
-            "RGBA",
-            (width, height),
-            (0, 0, 0, 0),
-        )
-
-        draw = ImageDraw.Draw(overlay)
-
-        font_candidates = [
-            "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf",
-            "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Bold.ttf",
-            "/usr/share/fonts/truetype/noto/NotoKufiArabic-Bold.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        ]
-
-        font_size = max(
-            24,
-            min(88, width // 12),
-        )
-
-        max_width = max(
-            50,
-            width - 32,
-        )
-
-        font_path_found = next(
-            (
-                path
-                for path in font_candidates
-                if os.path.isfile(path)
-            ),
-            None,
-        )
-
-        if not font_path_found:
-            raise RuntimeError(
-                "فونت مناسب پیدا نشد. "
-                "نصب فونت فارسی در Dockerfile را بررسی کن."
-            )
-
-        font = None
-
-        while font_size >= 16:
-            try:
-                layout_engine = (
-                    ImageFont.Layout.RAQM
-                    if use_raqm
-                    else ImageFont.Layout.BASIC
-                )
-
-                candidate_font = ImageFont.truetype(
-                    font_path_found,
-                    font_size,
-                    layout_engine=layout_engine,
-                )
-
-            except (OSError, ValueError):
-                font_size -= 2
-                continue
-
-            words = display_text.split()
-
-            widest_word = 0
-
-            for word in words:
-                box = draw.textbbox(
-                    (0, 0),
-                    word,
-                    font=candidate_font,
-                    stroke_width=3,
-                    **text_kwargs,
-                )
-
-                widest_word = max(
-                    widest_word,
-                    box[2] - box[0],
-                )
-
-            if widest_word <= max_width:
-                font = candidate_font
-                break
-
-            font_size -= 2
-
-        if font is None:
-            raise RuntimeError(
-                "اندازه مناسبی برای نمایش متن روی رسانه پیدا نشد."
-            )
-
-        # تقسیم متن به خطوط
-        lines = []
-        current = ""
-
-        for word in display_text.split():
-            candidate = f"{current} {word}".strip()
-
-            box = draw.textbbox(
-                (0, 0),
-                candidate,
-                font=font,
-                stroke_width=3,
-                **text_kwargs,
-            )
-
-            candidate_width = box[2] - box[0]
-
-            if candidate_width > max_width and current:
-                lines.append(current)
-                current = word
-
-            else:
-                current = candidate
-
-        if current:
-            lines.append(current)
-
-        line_height = max(
-            font_size + 12,
-            30,
-        )
-
-        total_height = line_height * len(lines)
-
-        y = max(
-            8,
-            height - total_height - max(32, height // 18),
-        )
-
-        stroke_width = max(
-            2,
-            min(4, font_size // 14),
-        )
-
-        for line in lines:
-            box = draw.textbbox(
-                (0, 0),
-                line,
-                font=font,
-                stroke_width=stroke_width,
-                **text_kwargs,
-            )
-
-            text_width = box[2] - box[0]
-
-            x = max(
-                8,
-                (width - text_width) // 2 - box[0],
-            )
-
-            draw.text(
-                (x, y - box[1]),
-                line,
-                font=font,
-                fill=(255, 255, 255, 255),
-                stroke_width=stroke_width,
-                stroke_fill=(0, 0, 0, 235),
-                **text_kwargs,
-            )
-
-            y += line_height
-
-        overlay.save(
-            destination,
-            format="PNG",
-            optimize=False,
-        )
-
-    # ======================================
     #               GIF Creation
     # ======================================
 
@@ -908,16 +676,15 @@ class GifMakerFeature:
         self,
         input_path,
         output_path,
-        overlay_path,
         kind,
     ):
         """
-        ساخت گیف با متن.
+        تبدیل عکس، ویدئو یا GIF به GIF بدون افزودن متن.
 
-        - ابعاد تصویر تغییر داده نمی‌شود.
-        - نرخ فریم برای افزایش سرعت محدود می‌شود.
-        - مصرف تردها محدود می‌شود.
-        - ورودی عکس به دو ثانیه محدود می‌شود.
+        - رزولوشن اصلی حفظ می‌شود؛ هیچ scale یا resize وجود ندارد.
+        - خروجی ۲۰ فریم بر ثانیه برای حرکت روان‌تر است.
+        - ورودی عکس دو ثانیه است و همان ابعاد اصلی را دارد.
+        - تعداد تردها محدود است تا خطر مصرف بیش از حد RAM کمتر شود.
         """
 
         ffmpeg = self._find_ffmpeg()
@@ -953,23 +720,14 @@ class GifMakerFeature:
 
         fps = self.OUTPUT_FPS
 
-        # عکس ثابت است؛ از پالت کامل استفاده می‌کنیم.
-        # برای ویدیو و GIF، پالت تغییرات فریم‌ها را در نظر می‌گیرد.
-        palette_stats = (
-            "stats_mode=full"
-            if kind == "photo"
-            else "stats_mode=diff"
-        )
-
+        # پالت تغییرات فریم‌ها برای کاهش پردازش تکراری
+        # و حفظ کیفیت رنگ در عکس ثابت، ویدئو و GIF.
         filter_graph = (
-            "[0:v]setsar=1[base];"
-            "[base][1:v]"
-            "overlay=0:0:"
-            "eof_action=repeat:shortest=1,"
+            "[0:v]setsar=1,"
             f"fps={fps},"
             "split[a][b];"
             "[a]palettegen="
-            f"{palette_stats}:"
+            "stats_mode=diff:"
             "reserve_transparent=0[p];"
             "[b][p]paletteuse="
             "dither=bayer:"
@@ -977,37 +735,22 @@ class GifMakerFeature:
             "diff_mode=rectangle"
         )
 
-        overlay_input = [
-            "-loop",
-            "1",
-            "-framerate",
-            str(fps),
-            "-i",
-            overlay_path,
-        ]
-
         command = [
             ffmpeg,
             "-y",
             "-hide_banner",
             "-loglevel",
             "error",
-
-            # کاهش مصرف حافظه و جلوگیری از ایجاد تردهای زیاد
             "-threads",
             "1",
-
             "-filter_threads",
             "1",
-
             "-filter_complex_threads",
             "1",
         ]
 
         if kind == "photo":
-            # نکته مهم:
-            # محدودیت -t باید قبل از -i قرار بگیرد تا ورودی
-            # عکس تکرارشونده واقعاً پایان پیدا کند.
+            # محدودیت -t قبل از -i است تا ورودی تکرارشونده تمام شود.
             command.extend([
                 "-loop",
                 "1",
@@ -1018,15 +761,11 @@ class GifMakerFeature:
                 "-i",
                 input_path,
             ])
-
         else:
-            # ورودی ویدیویی یا GIF
             command.extend([
                 "-i",
                 input_path,
             ])
-
-        command.extend(overlay_input)
 
         command.extend([
             "-filter_complex",
@@ -1034,7 +773,6 @@ class GifMakerFeature:
         ])
 
         if kind == "photo":
-            # محدودیت زمان خروجی نیز حفظ می‌شود.
             command.extend([
                 "-t",
                 "2",
@@ -1053,7 +791,7 @@ class GifMakerFeature:
 
         logger.info(
             "Starting GIF conversion | kind=%s | "
-            "dimensions=%sx%s | fps=%s",
+            "dimensions=%sx%s | fps=%s | text_overlay=disabled",
             kind,
             width,
             height,
@@ -1173,9 +911,7 @@ class GifMakerFeature:
         if not isinstance(message, dict):
             return False
 
-        overlay_text = self._parse_command(message)
-
-        if not overlay_text:
+        if not self._parse_command(message):
             return False
 
         reply = message.get("reply_to_message")
@@ -1212,7 +948,6 @@ class GifMakerFeature:
             args=(
                 message,
                 media,
-                overlay_text,
             ),
             daemon=True,
         )
@@ -1240,7 +975,6 @@ class GifMakerFeature:
         self,
         message,
         media,
-        overlay_text,
     ):
         """دانلود، پردازش و ارسال گیف."""
 
@@ -1288,11 +1022,6 @@ class GifMakerFeature:
                     "input_media",
                 )
 
-                overlay_path = os.path.join(
-                    temp_dir,
-                    "text_overlay.png",
-                )
-
                 output_path = os.path.join(
                     temp_dir,
                     "output.gif",
@@ -1314,42 +1043,12 @@ class GifMakerFeature:
                 )
 
                 # ----------------------------------
-                #            Media Info
-                # ----------------------------------
-
-                ffmpeg = self._find_ffmpeg()
-
-                _duration, width, height = (
-                    self._get_media_info(
-                        ffmpeg,
-                        input_path,
-                    )
-                )
-
-                if not width or not height:
-                    raise RuntimeError(
-                        "تشخیص ابعاد رسانه ناموفق بود."
-                    )
-
-                # ----------------------------------
-                #           Text Overlay
-                # ----------------------------------
-
-                self._create_text_overlay(
-                    width,
-                    height,
-                    overlay_text,
-                    overlay_path,
-                )
-
-                # ----------------------------------
                 #             Make GIF
                 # ----------------------------------
 
                 self._make_gif(
                     input_path,
                     output_path,
-                    overlay_path,
                     media["kind"],
                 )
 
@@ -1395,4 +1094,4 @@ class GifMakerFeature:
             except ValueError:
                 logger.exception(
                     "GIF semaphore release failed."
-)
+            )
