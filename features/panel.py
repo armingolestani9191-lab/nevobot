@@ -777,11 +777,10 @@ class PanelFeature:
 
     def open_panel(self, message):
         """
-        باز کردن پنل در همان پیام ورودی.
+        باز کردن پنل با ارسال یک پیام تازه.
 
-        برای اتصال در main.py باید بعداً یک پیام پنل
-        با sendMessage ساخته شود و شناسه پیام آن
-        برای callbackها در دسترس باشد.
+        پیام دستور «پنل» دست‌نخورده می‌ماند؛ تمام جابه‌جایی
+        صفحه‌ها پس از آن، همان پیام تازهٔ پنل را ویرایش می‌کند.
         """
 
         if not isinstance(message, dict):
@@ -802,19 +801,47 @@ class PanelFeature:
 
         text, keyboard = self._main_page()
 
-        # اگر message_id متعلق به پیام فرمان باشد،
-        # تلاش برای ویرایش آن انجام می‌شود.
-        message_id = message.get("message_id")
-
-        if message_id is None:
+        try:
+            result = self.api(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "reply_markup": keyboard,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Could not send management panel."
+            )
             return False
 
-        return self._edit_panel(
-            chat_id,
-            message_id,
-            text,
-            keyboard,
-        )
+        if (
+            not isinstance(result, dict)
+            or result.get("ok") is not True
+        ):
+            logger.warning(
+                "Panel send failed: %s",
+                (
+                    result.get("description", "Unknown error")
+                    if isinstance(result, dict)
+                    else "No valid API response"
+                ),
+            )
+            return False
+
+        sent_message = result.get("result") or {}
+
+        if (
+            not isinstance(sent_message, dict)
+            or sent_message.get("message_id") is None
+        ):
+            logger.warning(
+                "Panel send response did not contain message_id."
+            )
+            return False
+
+        return True
 
     # ======================================
     #              Callback Entry
@@ -1026,11 +1053,9 @@ class PanelFeature:
                     ),
                 )
 
-                page = (
-                    PAGE_PROFANITY
-                    if settings.get("enabled")
-                    else PAGE_COMMANDS
-                )
+                # بعد از روشن یا خاموش‌کردن، همیشه صفحه ضد فحش
+                # نمایش داده می‌شود تا گزینه‌های همان قابلیت مشخص باشند.
+                page = PAGE_PROFANITY
 
             # ----------------------------------
             # Change profanity level
