@@ -328,7 +328,6 @@ class GifMakerFeature:
                 "مسیر فایل در پاسخ API وجود ندارد."
             )
 
-        # جلوگیری از ایجاد مسیر اشتباه
         file_path = file_path.lstrip("/")
 
         return file_path
@@ -364,8 +363,6 @@ class GifMakerFeature:
 
         destination = base_path + extension
 
-        # مسیر فایل از پاسخ API گرفته شده است.
-        # برای URL، بخش مسیر را جداگانه encode می‌کنیم.
         encoded_path = quote(
             file_path,
             safe="/",
@@ -486,7 +483,10 @@ class GifMakerFeature:
 
         if not isinstance(result, dict) or not result.get("ok"):
             description = (
-                result.get("description", "ارسال گیف ناموفق بود.")
+                result.get(
+                    "description",
+                    "ارسال گیف ناموفق بود.",
+                )
                 if isinstance(result, dict)
                 else "پاسخ نامعتبر از API بله"
             )
@@ -515,7 +515,7 @@ class GifMakerFeature:
 
     @staticmethod
     def _run_ffmpeg(command):
-        """اجرای FFmpeg و ثبت کامل‌تر خطا."""
+        """اجرای FFmpeg و ثبت جزئیات خطا."""
 
         try:
             result = subprocess.run(
@@ -553,6 +553,12 @@ class GifMakerFeature:
             details = (
                 result.stderr or ""
             ).strip()
+
+            if result.returncode == -9:
+                logger.error(
+                    "FFmpeg was killed with SIGKILL (returncode=-9). "
+                    "This often indicates the container hit its memory limit."
+                )
 
             logger.error(
                 "FFmpeg failed | returncode=%s | "
@@ -631,9 +637,6 @@ class GifMakerFeature:
                 + seconds
             )
 
-        # ابتدا ابعاد استریم ویدیویی را پیدا می‌کنیم.
-        # این کار احتمال اشتباه گرفتن ابعاد دیگری از لاگ
-        # با ابعاد واقعی تصویر را کاهش می‌دهد.
         stream_matches = re.findall(
             r"Stream #\d+:\d+.*?:\s*"
             r"(?:Video|mjpeg|png|webp|gif)[^,\n]*,"
@@ -647,8 +650,6 @@ class GifMakerFeature:
             height = int(stream_matches[0][1])
 
         else:
-            # روش جایگزین برای نسخه‌های متفاوت FFmpeg
-            # و برخی فرمت‌های تصویری.
             resolution_matches = re.findall(
                 r"(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)",
                 output,
@@ -768,7 +769,8 @@ class GifMakerFeature:
 
         if not font_path_found:
             raise RuntimeError(
-                "فونت مناسب پیدا نشد. نصب فونت فارسی در Dockerfile را بررسی کن."
+                "فونت مناسب پیدا نشد. "
+                "نصب فونت فارسی در Dockerfile را بررسی کن."
             )
 
         font = None
@@ -914,8 +916,8 @@ class GifMakerFeature:
 
         - ابعاد تصویر تغییر داده نمی‌شود.
         - نرخ فریم برای افزایش سرعت محدود می‌شود.
-        - پالت رنگی برای کاهش حجم بهینه می‌شود.
-        - تغییرات فریم‌ها برای کاهش حجم GIF استفاده می‌شود.
+        - مصرف تردها محدود می‌شود.
+        - ورودی عکس به دو ثانیه محدود می‌شود.
         """
 
         ffmpeg = self._find_ffmpeg()
@@ -949,15 +951,15 @@ class GifMakerFeature:
                 "طول فیلم باید حداکثر ۱۵ ثانیه باشد."
             )
 
-        # عکس خروجی دوثانیه‌ای می‌سازد.
-        # برای ویدیو و گیف، طول رسانه حفظ می‌شود.
-        #
-        # fps برای جلوگیری از پردازش بی‌مورد فریم‌های
-        # بسیار زیاد محدود می‌شود.
-        #
-        # ابعاد دست‌نخورده باقی می‌ماند.
-
         fps = self.OUTPUT_FPS
+
+        # عکس ثابت است؛ از پالت کامل استفاده می‌کنیم.
+        # برای ویدیو و GIF، پالت تغییرات فریم‌ها را در نظر می‌گیرد.
+        palette_stats = (
+            "stats_mode=full"
+            if kind == "photo"
+            else "stats_mode=diff"
+        )
 
         filter_graph = (
             "[0:v]setsar=1[base];"
@@ -967,7 +969,7 @@ class GifMakerFeature:
             f"fps={fps},"
             "split[a][b];"
             "[a]palettegen="
-            "stats_mode=diff:"
+            f"{palette_stats}:"
             "reserve_transparent=0[p];"
             "[b][p]paletteuse="
             "dither=bayer:"
@@ -990,20 +992,29 @@ class GifMakerFeature:
             "-hide_banner",
             "-loglevel",
             "error",
+
+            # کاهش مصرف حافظه و جلوگیری از ایجاد تردهای زیاد
             "-threads",
-            "0",
+            "1",
+
+            "-filter_threads",
+            "1",
+
             "-filter_complex_threads",
-            "2",
+            "1",
         ]
 
         if kind == "photo":
-            # عکس را با پسوند واقعی فایل باز می‌کنیم.
-            # تصویر دو ثانیه تکرار می‌شود.
+            # نکته مهم:
+            # محدودیت -t باید قبل از -i قرار بگیرد تا ورودی
+            # عکس تکرارشونده واقعاً پایان پیدا کند.
             command.extend([
                 "-loop",
                 "1",
                 "-framerate",
                 str(fps),
+                "-t",
+                "2",
                 "-i",
                 input_path,
             ])
@@ -1023,6 +1034,7 @@ class GifMakerFeature:
         ])
 
         if kind == "photo":
+            # محدودیت زمان خروجی نیز حفظ می‌شود.
             command.extend([
                 "-t",
                 "2",
@@ -1035,7 +1047,7 @@ class GifMakerFeature:
             "-gifflags",
             "+offsetting+transdiff",
             "-threads",
-            "0",
+            "1",
             output_path,
         ])
 
@@ -1174,8 +1186,6 @@ class GifMakerFeature:
         media = self._get_media(reply)
 
         if not media or not media.get("file_id"):
-            # پیام‌های معمولی نباید توسط این قابلیت
-            # متوقف شوند.
             return False
 
         chat = message.get("chat") or {}
@@ -1288,8 +1298,6 @@ class GifMakerFeature:
                     "output.gif",
                 )
 
-                # پسوند ورودی براساس مسیر واقعی فایل
-                # انتخاب می‌شود.
                 fallback_extension = {
                     "photo": ".jpg",
                     "video": ".mp4",
@@ -1376,7 +1384,6 @@ class GifMakerFeature:
             )
 
         finally:
-            # حتی اگر دانلود، ساخت یا ارسال شکست خورد،
             # پیام وضعیت حذف و ظرفیت پردازش آزاد می‌شود.
             self._delete_status_message(
                 chat_id,
@@ -1388,4 +1395,4 @@ class GifMakerFeature:
             except ValueError:
                 logger.exception(
                     "GIF semaphore release failed."
-    )
+)
