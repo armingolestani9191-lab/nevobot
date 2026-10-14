@@ -24,6 +24,7 @@ from features.moderators import ModeratorsFeature
 from features.mute import MuteFeature
 from features.spam import SpamFeature
 from features.whisper import WhisperFeature
+from features.profanity import ProfanityFeature
 
 
 # ==========================================
@@ -90,6 +91,12 @@ class NevoBot:
             send_message=self.send_message,
             delete_message=self.delete_message,
             answer_callback=self.answer_callback,
+        )
+
+        # اتصال قابلیت ضد فحش
+        self.profanity_feature = ProfanityFeature(
+            api=self.api,
+            is_authorized=self.is_moderation_authorized,
         )
 
     # ==========================================
@@ -454,6 +461,22 @@ class NevoBot:
 
             return True
 
+        # قابلیت ضد فحش
+        profanity_result = (
+            self.profanity_feature.handle_message(
+                message
+            )
+        )
+
+        if profanity_result is not None:
+            if "text" in profanity_result:
+                self.send_message(
+                    chat_id,
+                    profanity_result["text"],
+                )
+
+            return True
+
         # قابلیت ضداسپم
         spam_result = (
             self.spam_feature.handle_message(
@@ -577,7 +600,7 @@ class NevoBot:
             if self.whisper_feature.handle_message(message):
                 return
 
-            # فرمان‌های مدیریتی، قفل‌ها و ضداسپم
+            # فرمان‌های مدیریتی، قفل‌ها، ضد فحش و ضداسپم
             if self.handle_moderation(message):
                 return
 
@@ -675,6 +698,9 @@ class NevoBot:
 
         # راه‌اندازی دیتابیس اختصاصی نجوا
         self.whisper_feature.init_database()
+
+        # راه‌اندازی دیتابیس اختصاصی ضد فحش
+        self.profanity_feature.init_database()
 
         logger.info("NevoBot is starting...")
 
