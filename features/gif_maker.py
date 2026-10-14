@@ -4,7 +4,6 @@
 
 import os
 import re
-import time
 import shutil
 import logging
 import tempfile
@@ -109,14 +108,12 @@ class GifMakerFeature:
 
     @staticmethod
     def _get_media(reply):
-        """
-        تشخیص عکس، ویدیو، گیف یا فایل گیف.
-        """
+        """تشخیص عکس، ویدیو، گیف یا فایل گیف."""
 
         if not isinstance(reply, dict):
             return None
 
-        # گیف ممکن است animation باشد.
+        # گیف متحرک
         animation = reply.get("animation")
 
         if isinstance(animation, dict):
@@ -125,7 +122,7 @@ class GifMakerFeature:
                 "kind": "gif",
             }
 
-        # فیلم
+        # ویدیو
         video = reply.get("video")
 
         if isinstance(video, dict):
@@ -134,7 +131,7 @@ class GifMakerFeature:
                 "kind": "video",
             }
 
-        # عکس؛ بزرگ‌ترین اندازه انتخاب می‌شود.
+        # عکس؛ انتخاب بزرگ‌ترین اندازه
         photos = reply.get("photo")
 
         if isinstance(photos, list) and photos:
@@ -244,7 +241,10 @@ class GifMakerFeature:
 
             if content_length:
                 try:
-                    if int(content_length) > self.MAX_DOWNLOAD_SIZE:
+                    if (
+                        int(content_length)
+                        > self.MAX_DOWNLOAD_SIZE
+                    ):
                         raise ValueError(
                             "حجم فایل بیشتر از حد مجاز است."
                         )
@@ -276,11 +276,7 @@ class GifMakerFeature:
         animation_path,
         reply_to_message_id=None,
     ):
-        """
-        ارسال گیف با درخواست multipart.
-
-        برای آپلود فایل از هدر JSON استفاده نمی‌کنیم.
-        """
+        """ارسال گیف با درخواست multipart."""
 
         payload = {
             "chat_id": chat_id,
@@ -361,7 +357,7 @@ class GifMakerFeature:
 
     @staticmethod
     def _get_media_info(ffmpeg, input_path):
-        """گرفتن مدت و ابعاد رسانه با ffmpeg."""
+        """گرفتن مدت و ابعاد رسانه با FFmpeg."""
 
         command = [
             ffmpeg,
@@ -412,6 +408,10 @@ class GifMakerFeature:
 
         return duration, width, height
 
+    # ======================================
+    #             Text Overlay
+    # ======================================
+
     @staticmethod
     def _create_text_overlay(
         width,
@@ -419,31 +419,45 @@ class GifMakerFeature:
         text,
         destination,
     ):
-        """
-        ساخت تصویر شفاف متن.
-
-        متن با Pillow رسم می‌شود تا وابستگی مستقیم
-        به drawtext و پشتیبانی فونت FFmpeg نداشته باشیم.
-        """
+        """ساخت لایه شفاف متن فارسی."""
 
         try:
             from PIL import (
                 Image,
                 ImageDraw,
                 ImageFont,
+                features,
             )
+
             import arabic_reshaper
+
             from bidi.algorithm import get_display
 
         except ImportError as error:
             raise RuntimeError(
-                "وابستگی‌های Pillow و فارسی‌نویسی نصب نیستند."
+                "کتابخانه‌های Pillow و فارسی‌نویسی نصب نیستند."
             ) from error
 
         text = text.replace("\n", " ").strip()
 
-        reshaped = arabic_reshaper.reshape(text)
-        display_text = get_display(reshaped)
+        # در صورت وجود RAQM، خود Pillow شکل حروف فارسی
+        # و جهت راست‌به‌چپ را مدیریت می‌کند.
+        use_raqm = features.check_feature("raqm")
+
+        if use_raqm:
+            display_text = text
+
+            text_kwargs = {
+                "direction": "rtl",
+                "language": "fa",
+            }
+
+        else:
+            # روش جایگزین برای Pillowهایی که RAQM ندارند.
+            reshaped = arabic_reshaper.reshape(text)
+            display_text = get_display(reshaped)
+
+            text_kwargs = {}
 
         overlay = Image.new(
             "RGBA",
@@ -453,15 +467,15 @@ class GifMakerFeature:
 
         draw = ImageDraw.Draw(overlay)
 
+        # فونت مناسب فارسی؛ Noto در Docker نصب می‌شود.
         font_candidates = [
             "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         ]
 
         font = None
 
-        # اندازه متن متناسب با ابعاد رسانه
         font_size = max(
             18,
             min(64, width // 16),
@@ -473,8 +487,15 @@ class GifMakerFeature:
                     font = ImageFont.truetype(
                         font_path,
                         font_size,
+                        layout_engine=(
+                            ImageFont.Layout.RAQM
+                            if use_raqm
+                            else ImageFont.Layout.BASIC
+                        ),
                     )
+
                     break
+
                 except OSError:
                     continue
 
@@ -483,8 +504,9 @@ class GifMakerFeature:
 
         max_width = max(50, width - 32)
 
-        # شکستن متن‌های بلند به چند خط
+        # شکستن متن‌های طولانی به چند خط
         words = display_text.split()
+
         lines = []
         current = ""
 
@@ -498,14 +520,15 @@ class GifMakerFeature:
                 candidate,
                 font=font,
                 stroke_width=2,
+                **text_kwargs,
             )
 
-            if (
-                box[2] - box[0] > max_width
-                and current
-            ):
+            candidate_width = box[2] - box[0]
+
+            if candidate_width > max_width and current:
                 lines.append(current)
                 current = word
+
             else:
                 current = candidate
 
@@ -519,9 +542,10 @@ class GifMakerFeature:
 
         total_height = line_height * len(lines)
 
+        # متن کمی بالاتر از محل قبلی قرار می‌گیرد.
         y = max(
             8,
-            height - total_height - 24,
+            height - total_height - 48,
         )
 
         for line in lines:
@@ -530,6 +554,7 @@ class GifMakerFeature:
                 line,
                 font=font,
                 stroke_width=2,
+                **text_kwargs,
             )
 
             text_width = box[2] - box[0]
@@ -546,6 +571,7 @@ class GifMakerFeature:
                 fill=(255, 255, 255, 255),
                 stroke_width=2,
                 stroke_fill=(0, 0, 0, 220),
+                **text_kwargs,
             )
 
             y += line_height
@@ -555,6 +581,10 @@ class GifMakerFeature:
             format="PNG",
             optimize=False,
         )
+
+    # ======================================
+    #              GIF Creation
+    # ======================================
 
     def _make_gif(
         self,
@@ -566,8 +596,8 @@ class GifMakerFeature:
         """
         تبدیل رسانه به GIF و افزودن متن.
 
-        برای GIF و ویدیو عمداً فیلتر تغییر سرعت،
-        تغییر ابعاد یا افکت تصویری اعمال نمی‌شود.
+        ابعاد پیکسلی ورودی عمداً تغییر داده نمی‌شوند.
+        لایه متن هم‌اندازه ورودی است.
         """
 
         ffmpeg = self._find_ffmpeg()
@@ -598,8 +628,28 @@ class GifMakerFeature:
                 "برای ساخت سریع گیف، طول فیلم باید حداکثر ۱۵ ثانیه باشد."
             )
 
+        # لایه متن یک تصویر PNG ثابت است؛ آن را حلقه‌ای می‌خوانیم
+        # تا در طول تمام فریم‌ها قابل استفاده باشد.
+        overlay_input = [
+            "-loop",
+            "1",
+            "-framerate",
+            "10",
+            "-i",
+            overlay_path,
+        ]
+
+        filter_graph = (
+            "[0:v]setsar=1[base];"
+            "[base][1:v]overlay=0:0:"
+            "eof_action=repeat:shortest=1,"
+            "split[a][b];"
+            "[a]palettegen=reserve_transparent=0[p];"
+            "[b][p]paletteuse"
+        )
+
         if kind == "photo":
-            # عکس ثابت به گیف کوتاه تبدیل می‌شود.
+            # عکس به GIF کوتاه دوثانیه‌ای تبدیل می‌شود.
             command = [
                 ffmpeg,
                 "-y",
@@ -612,15 +662,9 @@ class GifMakerFeature:
                 "10",
                 "-i",
                 input_path,
-                "-i",
-                overlay_path,
+                *overlay_input,
                 "-filter_complex",
-                (
-                    "[0:v][1:v]overlay=0:0:shortest=1,"
-                    "split[a][b];"
-                    "[a]palettegen=reserve_transparent=0[p];"
-                    "[b][p]paletteuse"
-                ),
+                filter_graph,
                 "-t",
                 "2",
                 "-loop",
@@ -629,8 +673,8 @@ class GifMakerFeature:
             ]
 
         else:
-            # گیف و ویدیو:
-            # ابعاد و نرخ فریم را به صورت دستی تغییر نمی‌دهیم.
+            # ویدیو یا GIF؛ بدون تغییر اندازه اجباری
+            # و بدون فیلتر تغییر سرعت.
             command = [
                 ffmpeg,
                 "-y",
@@ -639,15 +683,9 @@ class GifMakerFeature:
                 "error",
                 "-i",
                 input_path,
-                "-i",
-                overlay_path,
+                *overlay_input,
                 "-filter_complex",
-                (
-                    "[0:v][1:v]overlay=0:0:shortest=1,"
-                    "split[a][b];"
-                    "[a]palettegen=reserve_transparent=0[p];"
-                    "[b][p]paletteuse"
-                ),
+                filter_graph,
                 "-loop",
                 "0",
                 output_path,
@@ -664,6 +702,44 @@ class GifMakerFeature:
             )
 
     # ======================================
+    #          Status Message Helpers
+    # ======================================
+
+    def _delete_status_message(self, chat_id, message_id):
+        """حذف پیام وضعیت پس از پایان پردازش."""
+
+        if chat_id is None or message_id is None:
+            return
+
+        try:
+            response = self.session.post(
+                f"{self.api_url}/deleteMessage",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                },
+                timeout=self.request_timeout,
+            )
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            if not data.get("ok"):
+                logger.warning(
+                    "Could not delete GIF status message: %s",
+                    data.get(
+                        "description",
+                        "Unknown error",
+                    ),
+                )
+
+        except Exception:
+            logger.exception(
+                "Could not delete GIF status message."
+            )
+
+    # ======================================
     #             Error Handling
     # ======================================
 
@@ -675,6 +751,7 @@ class GifMakerFeature:
 
         if isinstance(error, ValueError):
             text = f"⚠️ {error}"
+
         else:
             text = (
                 "❌ ساخت گیف ناموفق بود.\n"
@@ -686,6 +763,7 @@ class GifMakerFeature:
                 chat_id,
                 text,
             )
+
         except Exception:
             logger.exception(
                 "Could not send GIF error message."
@@ -734,6 +812,7 @@ class GifMakerFeature:
                     "الان دو گیف در حال پردازش‌اند؛ چند لحظه دیگر امتحان کن."
                 ),
             )
+
             return True
 
         worker = threading.Thread(
@@ -764,7 +843,28 @@ class GifMakerFeature:
 
         message_id = message.get("message_id")
 
+        status_message_id = None
+
         try:
+            # پیام موقت زمان پردازش
+            if self.send_message:
+                status_result = self.send_message(
+                    chat_id,
+                    (
+                        "🎞️ گیف با بالاترین کیفیت ممکن "
+                        "در حال تولید است؛ لطفاً صبور باشید…"
+                    ),
+                )
+
+                if (
+                    isinstance(status_result, dict)
+                    and status_result.get("ok")
+                ):
+                    status_message_id = (
+                        (status_result.get("result") or {})
+                        .get("message_id")
+                    )
+
             with tempfile.TemporaryDirectory(
                 prefix="nevobot_gif_"
             ) as temp_dir:
@@ -790,7 +890,7 @@ class GifMakerFeature:
                     input_path,
                 )
 
-                # گرفتن ابعاد برای ساخت لایه متن
+                # تشخیص ابعاد رسانه
                 ffmpeg = self._find_ffmpeg()
 
                 _duration, width, height = (
@@ -805,6 +905,7 @@ class GifMakerFeature:
                         "ابعاد رسانه قابل تشخیص نیست."
                     )
 
+                # ساخت متن با همان ابعاد رسانه
                 self._create_text_overlay(
                     width,
                     height,
@@ -820,7 +921,7 @@ class GifMakerFeature:
                     media["kind"],
                 )
 
-                # ارسال خروجی
+                # ارسال گیف به‌صورت ریپلای به دستور
                 self._send_animation(
                     chat_id,
                     output_path,
@@ -844,4 +945,10 @@ class GifMakerFeature:
             )
 
         finally:
+            # پیام وضعیت در پایان پردازش پاک می‌شود.
+            self._delete_status_message(
+                chat_id,
+                status_message_id,
+            )
+
             self._semaphore.release()
